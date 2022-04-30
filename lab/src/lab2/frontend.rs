@@ -187,7 +187,7 @@ impl trib::Server for FrontEnd {
             Ok(v) => v,
             Err(e) => return Err(Box::new(TribblerError::Unknown(e.to_string()))), // some error from remote service; sign_up not successful
         };
-        let logical_clk = match user_bin.clock(clock).await {
+        let logical_clk = match user_bin.clock(clock + 1).await {
             Ok(v) => v,
             Err(e) => return Err(Box::new(TribblerError::Unknown(e.to_string()))), // some error from remote service; sign_up not successful
         };
