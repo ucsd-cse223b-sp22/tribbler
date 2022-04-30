@@ -1,7 +1,9 @@
 use crate::lab2::storage_client::StorageClient;
 use async_trait::async_trait;
+
 use tribbler::colon;
 use tribbler::{err::TribResult, storage};
+
 pub struct BinStoreClient {
     pub name: String,
     pub colon_escaped_name: String,
@@ -23,12 +25,14 @@ impl storage::KeyString for BinStoreClient {
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         let mut colon_escaped_key = self.colon_escaped_name.to_owned();
         colon_escaped_key.push_str(&key);
+
         let result = self.bin_client.get(&colon_escaped_key).await?;
         Ok(result)
     }
     async fn set(&self, kv: &storage::KeyValue) -> TribResult<bool> {
         let mut colon_escaped_key = self.colon_escaped_name.to_owned();
         colon_escaped_key.push_str(&kv.key);
+
         let result = self
             .bin_client
             .set(&storage::KeyValue {
@@ -39,8 +43,13 @@ impl storage::KeyString for BinStoreClient {
         Ok(result)
     }
     async fn keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let colon_escaped_prefix = colon::escape(&p.prefix).to_owned();
+        let mut colon_escaped_prefix = self.colon_escaped_name.to_owned();
+        colon_escaped_prefix.push_str(&p.prefix);
+        //log::info!("colon_escaped_prefix: {}", colon_escaped_prefix);
+
         let colon_escaped_suffix = colon::escape(&p.suffix).to_owned();
+        //log::info!("colon_escaped_suffix: {}", colon_escaped_suffix);
+
         let storage::List(result_keys) = self
             .bin_client
             .keys(&storage::Pattern {
@@ -48,6 +57,7 @@ impl storage::KeyString for BinStoreClient {
                 suffix: colon_escaped_suffix.clone(),
             })
             .await?;
+
         let mut result_keys_for_bin: Vec<String> = Vec::new();
         for key in result_keys {
             let mut colon_name = self.name.to_owned();
@@ -65,6 +75,7 @@ impl storage::KeyList for BinStoreClient {
     async fn list_get(&self, key: &str) -> TribResult<storage::List> {
         let mut colon_escaped_key = self.colon_escaped_name.to_owned();
         colon_escaped_key.push_str(&key);
+
         let result = self.bin_client.list_get(&colon_escaped_key).await?;
         Ok(result)
     }
@@ -72,6 +83,7 @@ impl storage::KeyList for BinStoreClient {
     async fn list_append(&self, kv: &storage::KeyValue) -> TribResult<bool> {
         let mut colon_escaped_key = self.colon_escaped_name.to_owned();
         colon_escaped_key.push_str(&kv.key);
+
         let result = self
             .bin_client
             .list_append(&storage::KeyValue {
@@ -85,6 +97,7 @@ impl storage::KeyList for BinStoreClient {
     async fn list_remove(&self, kv: &storage::KeyValue) -> TribResult<u32> {
         let mut colon_escaped_key = self.colon_escaped_name.to_owned();
         colon_escaped_key.push_str(&kv.key);
+
         let result = self
             .bin_client
             .list_remove(&storage::KeyValue {
@@ -96,7 +109,9 @@ impl storage::KeyList for BinStoreClient {
     }
 
     async fn list_keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let colon_escaped_prefix = colon::escape(&p.prefix).to_owned();
+        let mut colon_escaped_prefix = self.colon_escaped_name.to_owned();
+        colon_escaped_prefix.push_str(&p.prefix);
+
         let colon_escaped_suffix = colon::escape(&p.suffix).to_owned();
         let storage::List(result_keys) = self
             .bin_client
