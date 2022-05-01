@@ -1,4 +1,5 @@
-use std::net::ToSocketAddrs; // final version
+use std::net::ToSocketAddrs;
+use std::sync::Arc; // final version
 
 use crate::lab1::client::StorageClient;
 use crate::lab1::server::StorageServer;
@@ -70,5 +71,6 @@ pub async fn serve_back(config: BackConfig) -> TribResult<()> {
 pub async fn new_client(addr: &str) -> TribResult<Box<dyn Storage>> {
     Ok(Box::new(StorageClient {
         addr: addr.to_string(),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     }))
 }

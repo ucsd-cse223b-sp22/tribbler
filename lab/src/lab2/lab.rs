@@ -1,5 +1,8 @@
 use crate::lab2::bin_store::BinStore;
-use std::{error::Error, sync::Mutex};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+};
 use tokio::time;
 use tribbler::{
     config::KeeperConfig,
@@ -33,6 +36,7 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     for address in kc.backs {
         storage_clients.push(StorageClient {
             addr: format!("http://{}", address.clone()),
+            cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
         });
     }
     if let Some(tx) = kc.ready.clone() {
