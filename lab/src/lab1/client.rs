@@ -43,9 +43,7 @@ impl storage::KeyString for StorageClient {
     async fn set(&self, kv: &storage::KeyValue) -> TribResult<bool> {
         let my_cached_conn = Arc::clone(&self.cached_conn);
         let mut mut_cached_conn = my_cached_conn.lock().await;
-        println!("==================================================");
         if mut_cached_conn.is_none() {
-            println!("================++++++++++++++================");
             *mut_cached_conn = Some(TribStorageClient::connect(self.addr.clone()).await?);
         }
 
