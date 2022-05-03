@@ -3,7 +3,7 @@ use std::{
     error::Error,
     sync::{Arc, Mutex},
 };
-use tokio::time;
+use tokio::{sync::mpsc::Sender, time};
 use tribbler::{
     config::KeeperConfig,
     err::TribResult,
@@ -30,7 +30,7 @@ pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage
 /// sure to send the proper signal to the channel in `kc` when the keeper has
 /// started.
 #[allow(unused_variables)]
-pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
+pub async fn serve_keeper(kc: KeeperConfig, shut_tx: Sender<()>) -> TribResult<()> {
     let mut interval = time::interval(time::Duration::from_secs(1));
     let mut storage_clients: Vec<StorageClient> = Vec::new();
     for address in kc.backs {
@@ -45,12 +45,15 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
             Err(e) => return Err(Box::new(e)),
         };
     }
+    println!("===================here=======================");
     tokio::select! {
         _ = async move {
             let mut current_clock = 0;
             let mut max_so_far = 0;
+            let mut shutdown_count = 0;
             loop {
                 interval.tick().await;
+                println!("===================here=======================");
                 for client in storage_clients.iter() {
                     let clock = match client.clock(current_clock).await {
                         Ok(v) => v,
@@ -64,6 +67,13 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
                             return Result::<(), Box<dyn Error + Send + Sync>>::Err(ex)
                         }
                     };
+                    if shutdown_count < 20 {
+                        shutdown_count += 1;
+                    } else {
+                        println!("shutdown sent");
+                        shut_tx.send(()).await?;
+                    }
+
                     if clock > max_so_far {
                         max_so_far = clock;
                     }

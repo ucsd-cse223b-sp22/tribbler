@@ -45,7 +45,7 @@ pub async fn main(
                 t.clone(),
                 i,
                 config.clone(),
-                Some(tx.clone()),
+                Some(tx.clone())
             )));
         }
     }
@@ -71,6 +71,7 @@ pub async fn main(
             process::exit(1);
         }
     }
+    println!("================+++++++++++++++++++===================");
     for h in handles {
         match join!(h) {
             (Ok(_),) => (),
@@ -91,9 +92,10 @@ async fn run_srv(t: ProcessType, idx: usize, config: Arc<Config>, tx: Option<Sen
             lab1::serve_back(cfg).await;
         }
         ProcessType::Keep => {
-            let cfg = config.keeper_config(idx, tx, None).unwrap();
+            let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let cfg = config.keeper_config(idx, tx, Some(shut_rx)).unwrap();
             info!("starting keeper on {}", cfg.addr());
-            lab2::serve_keeper(cfg).await;
+            lab2::serve_keeper(cfg, shut_tx).await;
         }
     };
 }
