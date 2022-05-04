@@ -1,88 +1,93 @@
-// use std::{
-//     sync::{
-//         mpsc::{self, Receiver, Sender},
-//         Arc,
-//     },
-//     thread,
-//     time::Duration,
-// };
+use std::{
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
-// use lab::{self, lab1};
-// use log::LevelFilter;
-// use tokio::{sync::mpsc::Sender as MpscSender, task::JoinHandle};
+use lab::{self, lab3};
+use log::LevelFilter;
+use tokio::{sync::mpsc::Sender as MpscSender, task::JoinHandle};
 
-// use tribbler::addr::rand::rand_port;
-// #[allow(unused_imports)]
-// use tribbler::{
-//     self,
-//     config::BackConfig,
-//     err::{TribResult, TribblerError},
-//     storage::{KeyList, KeyString, KeyValue, MemStorage, Pattern, Storage},
-// };
+use crate::lab::keeper::keeper_sync_client::KeeperSyncClient;
 
-// const DEFAULT_HOST: &str = "127.0.0.1:3000";
+use tonic::transport::Channel;
+use tribbler::addr::rand::rand_port;
+#[allow(unused_imports)]
+use tribbler::{
+    self,
+    config::BackConfig,
+    err::{TribResult, TribblerError},
+    storage::{KeyList, KeyString, KeyValue, MemStorage, Pattern, Storage},
+};
 
-// async fn setup(
-//     addr: Option<&str>,
-//     storage: Option<Box<dyn Storage + Send + Sync>>,
-// ) -> TribResult<(Box<dyn Storage>, JoinHandle<TribResult<()>>, MpscSender<()>)> {
-//     let _ = env_logger::builder()
-//         .default_format()
-//         .filter_level(LevelFilter::Error)
-//         .try_init();
-//     let addr = match addr {
-//         Some(x) => x,
-//         None => DEFAULT_HOST,
-//     };
-//     let storage = match storage {
-//         Some(x) => x,
-//         None => Box::new(MemStorage::new()),
-//     };
-//     let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
-//     let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1);
-//     let cfg = BackConfig {
-//         addr: addr.to_string(),
-//         storage: storage,
-//         ready: Some(tx.clone()),
-//         shutdown: Some(shut_rx),
-//     };
+const DEFAULT_HOST: &str = "127.0.0.1:3000";
 
-//     let handle = spawn_back(cfg);
-//     let ready = rx.recv_timeout(Duration::from_secs(5))?;
-//     if !ready {
-//         return Err(Box::new(TribblerError::Unknown(
-//             "back failed to start".to_string(),
-//         )));
-//     }
-//     let client = lab1::new_client(format!("http://{}", addr).as_str()).await?;
-//     Ok((client, handle, shut_tx.clone()))
-// }
+async fn setup(
+    addr: Option<&str>,
+    storage: Option<Box<dyn Storage + Send + Sync>>,
+) -> TribResult<(KeeperSyncClient<Channel>, JoinHandle<TribResult<()>>, MpscSender<()>)> {
+    let _ = env_logger::builder()
+        .default_format()
+        .filter_level(LevelFilter::Error)
+        .try_init();
+    let addr = match addr {
+        Some(x) => x,
+        None => DEFAULT_HOST,
+    };
+    let storage = match storage {
+        Some(x) => x,
+        None => Box::new(MemStorage::new()),
+    };
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+    let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1);
+    let cfg = BackConfig {
+        addr: addr.to_string(),
+        storage: storage,
+        ready: Some(tx.clone()),
+        shutdown: Some(shut_rx),
+    };
 
-// fn spawn_back(cfg: BackConfig) -> tokio::task::JoinHandle<TribResult<()>> {
-//     tokio::spawn(lab1::serve_back(cfg))
-// }
+    let handle = spawn_back(cfg);
+    let ready = rx.recv_timeout(Duration::from_secs(5))?;
+    if !ready {
+        return Err(Box::new(TribblerError::Unknown(
+            "back failed to start".to_string(),
+        )));
+    }
+    let client = lab3::new_client(format!("http://{}", addr).as_str()).await?;
+    Ok((client, handle, shut_tx.clone()))
+}
 
-// fn kv(key: &str, value: &str) -> KeyValue {
-//     KeyValue {
-//         key: key.to_string(),
-//         value: value.to_string(),
-//     }
-// }
+fn spawn_back(cfg: BackConfig) -> tokio::task::JoinHandle<TribResult<()>> {
+    tokio::spawn(lab3::serve_back())
+}
 
-// fn pat(prefix: &str, suffix: &str) -> Pattern {
-//     Pattern {
-//         prefix: prefix.to_string(),
-//         suffix: suffix.to_string(),
-//     }
-// }
+fn kv(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
 
-// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// async fn test_get_set() -> TribResult<()> {
-//     let (client, _handle, _tx) = setup(None, None).await?;
-//     assert_eq!(None, client.get("").await?);
-//     assert_eq!(None, client.get("hello").await?);
-//     Ok(())
-// }
+fn pat(prefix: &str, suffix: &str) -> Pattern {
+    Pattern {
+        prefix: prefix.to_string(),
+        suffix: suffix.to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_get_set() -> TribResult<()> {
+    log::info!("==================================================");
+    let (mut client, _handle, _tx) = setup(None, None).await?;
+    let hb = client.get_heartbeat(tonic::Request::new(())).await?;
+    log::info!("Heartbeat: {:?}", hb);
+    // assert_eq!(None, client.get("hello").await?);
+    Ok(())
+}
 
 // #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // async fn test_get_set_overwrite() -> TribResult<()> {
@@ -211,7 +216,7 @@
 //     if !ready {
 //         panic!("failed to start")
 //     }
-//     let client = lab1::new_client(format!("http://{}", DEFAULT_HOST).as_str()).await?;
+//     let client = lab3::new_client(format!("http://{}", DEFAULT_HOST).as_str()).await?;
 //     assert_eq!(Some("hi".to_string()), client.get("hello").await?);
 //     Ok(())
 // }
@@ -275,7 +280,7 @@
 //     let _ = spawn_back(cfg);
 //     assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
 
-//     let client = lab1::new_client(format!("http://{}", addr.clone()).as_str()).await?;
+//     let client = lab3::new_client(format!("http://{}", addr.clone()).as_str()).await?;
 //     client.set(&kv("hello", "hi")).await?;
 //     assert_eq!(Some("hi".to_string()), client.get("hello").await?);
 //     Ok(())
@@ -294,7 +299,7 @@
 //     };
 //     let handle = spawn_back(cfg);
 //     assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
-//     let client = lab1::new_client(format!("http://{}", host).as_mut()).await?;
+//     let client = lab3::new_client(format!("http://{}", host).as_mut()).await?;
 //     client.set(&kv("hello", "hi")).await?;
 //     let _ = shut_tx.send(()).await?;
 //     let _ = handle.await;
@@ -321,7 +326,7 @@
 //     for _ in 0..5 {
 //         let addr = format!("http://{}", DEFAULT_HOST);
 //         let jh = tokio::spawn(async move {
-//             let client = match lab1::new_client(&addr).await {
+//             let client = match lab3::new_client(&addr).await {
 //                 Ok(c) => c,
 //                 Err(e) => return Err(TribblerError::Unknown(e.to_string())),
 //             };

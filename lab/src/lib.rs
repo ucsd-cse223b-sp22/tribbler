@@ -280,7 +280,7 @@
 #![doc(
     html_favicon_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f8/Creative-Tail-Animal-penguin.svg/128px-Creative-Tail-Animal-penguin.svg.png?20160314145218"
 )]
-mod keeper;
+pub mod keeper;
 pub mod lab1;
 pub mod lab2;
 pub mod lab3;

@@ -167,3 +167,9 @@
 //! if they feel the need.
 //!
 //! Happy Lab 3. :-)
+pub mod keeper_client;
+pub mod keeper_impl;
+pub mod keeper_server;
+pub mod lab;
+pub use crate::lab3::lab::new_client;
+pub use crate::lab3::lab::serve_back;
