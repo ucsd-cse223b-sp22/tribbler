@@ -1,4 +1,4 @@
-use crate::lab2::bin_store::BinStore;
+use crate::lab3::bin_store::BinStore;
 use std::{
     error::Error,
     sync::{Arc, Mutex},

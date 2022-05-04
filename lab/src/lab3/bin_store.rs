@@ -19,14 +19,47 @@ impl storage::BinStorage for BinStore {
         let mut hasher = DefaultHasher::new();
         hasher.write(name.as_bytes());
 
+        // get the first live backend as primary
         let hash = hasher.finish();
-        let backend_addr = &self.back_addrs[(hash % n) as usize];
+
+        let hashed_backend_index = hash % n; // generate hash and get the index of backend
+
+        let mut primary_backend_index = hashed_backend_index;
+
+        // iterate and find the next alive starting from hashed_backend_index
+        for backend_index_iter in 0..n {
+            let backend_addr =
+                &self.back_addrs[((backend_index_iter + hashed_backend_index) % n) as usize]; // start from hashed_backend_index
+            let client = StorageClient {
+                addr: format!("http://{}", backend_addr.clone())
+                    .as_str()
+                    .to_owned(),
+                cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+            };
+
+            // perform clock() rpc call to check if the backend is alive
+
+            match client.clock(0).await {
+                Ok(_) => {
+                    primary_backend_index = (backend_index_iter + hashed_backend_index) % n;
+                    break; // have a is_found
+                } // backend alive make it primary
+                Err(_) => {} // backend not alive
+            };
+        }
+
+        // get a client to the primary backend
+        let backend_addr = &self.back_addrs[primary_backend_index as usize];
         let client = StorageClient {
             addr: format!("http://{}", backend_addr.clone())
                 .as_str()
                 .to_owned(),
             cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
         };
+
+        // clock call to check that the primary backend is actually alive
+        // Otherwise error
+
         let mut colon_escaped_name: String = colon::escape(name.clone()).to_owned();
         colon_escaped_name.push_str(&"::".to_string());
 
@@ -42,6 +75,7 @@ impl storage::BinStorage for BinStore {
             colon_escaped_name,
             clients: storage_clients,
             bin_client: client,
+            bin_client_index: primary_backend_index as usize,
         }))
     }
 }
