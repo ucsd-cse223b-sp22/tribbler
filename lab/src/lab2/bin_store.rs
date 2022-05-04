@@ -36,7 +36,7 @@ impl storage::BinStorage for BinStore {
             let client = StorageClient {
                 addr: format!("http://{}", backend_addr.clone())
                     .as_str()
-                    .to_owned(),
+                    .to_owned(), // TODO: lets remove this; make first call when first request comes
                 cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
             };
 
@@ -84,7 +84,7 @@ impl storage::BinStorage for BinStore {
                 colon_escaped_name: colon_escaped_name.clone(),
                 back_addrs: self.back_addrs.clone(),
                 clients: storage_clients.clone(),
-                bin_store_client: bin_store_client,
+                bin_store_client: bin_store_client, // always make sure the bin_store_client.bin_client is updated
                 bin_client: client.clone(),
                 bin_client_index: primary_backend_index as usize,
             }))

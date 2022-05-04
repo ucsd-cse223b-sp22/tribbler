@@ -82,10 +82,9 @@ impl PartialEq for UpdateLog {
 impl storage::KeyString for Lab3BinStoreClient {
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         // fetch log by forwarding request to bin_store_client. It will handle prepending name and handling bin part
-        let storage::List(fetched_log) = match self.bin_store_client.list_get(KEY_UPDATE_LOG).await
         {
-            Ok(v) => v,
-            Err(_) => {
+            Ok(v) => v, // 1st shot return
+            Err(_) => { // 1st one didnt work; 2nd start 
                 // fetching logs is unsuccessful, try getting it from the next live backend. That is guaranteed to have the data
 
                 // error then find next alive node
@@ -123,7 +122,7 @@ impl storage::KeyString for Lab3BinStoreClient {
 
                 if is_primary_found {
                     // get a client to the primary backend
-                    self.bin_client_index = primary_backend_index.clone() as usize;
+                    self.bin_client_index = primary_backend_index.clone() as usize; // STORAGE_CLIENT rename
 
                     let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
 
@@ -142,7 +141,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                         bin_client: self.bin_client.clone(),
                     };
 
-                    self.bin_store_client.list_get(KEY_UPDATE_LOG).await?
+                    self.bin_store_client.list_get(KEY_UPDATE_LOG).await? // TODO: 3rd iteration, second live found but gone down while fetching log; then again iterate
                 } else {
                     // no live backend found, return error
                     return Err(Box::new(TribblerError::Unknown(
@@ -183,10 +182,10 @@ impl storage::KeyString for Lab3BinStoreClient {
         }
 
         // Error in first getting value from primary or value not found - the migration might not be complete. iterate live backends list and contact the next live
-        if return_value.eq("") {
+        if return_value.eq("") { // TODO: 4th check, if this also fails then do iterative search for next live
             // get live backends list
             let live_backends_list = self
-                .bin_store_client
+                .bin_store_client // TODO: change to storage_client and 
                 .list_get(KEY_LIVE_BACKENDS_LIST)
                 .await?;
 
@@ -336,7 +335,7 @@ impl storage::KeyString for Lab3BinStoreClient {
         let new_seq_num = self.bin_store_client.clock(0).await?;
 
         let new_update_log = UpdateLog {
-            seq_num: new_seq_num + 1,
+            seq_num: new_seq_num + 1, // no plus one here
             update_operation: UpdateOperation::Set,
             kv_params: KeyValue {
                 key: kv.key.clone(),
@@ -370,7 +369,7 @@ impl storage::KeyString for Lab3BinStoreClient {
         let live_backends_list = self
             .bin_store_client
             .list_get(KEY_LIVE_BACKENDS_LIST)
-            .await?;
+            .await?; // TODO: storage client // TODO: do a third check on error or if no live found s
 
         // iterate in live backends list, find the location of the primary and take the next as secondary
         let mut secondary_addr = self.back_addrs[self.bin_client_index].clone();
