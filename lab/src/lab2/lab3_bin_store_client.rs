@@ -155,12 +155,12 @@ impl storage::KeyString for Lab3BinStoreClient {
                             name: self.name.clone(),
                             colon_escaped_name: self.colon_escaped_name.clone(),
                             clients: self.clients.clone(),
-                            bin_client: *locked_bin_client,
+                            bin_client: (*locked_bin_client).clone(),
                         };
 
                         match (*locked_bin_store_client).list_get(KEY_UPDATE_LOG).await {
                             Ok(v) => v,
-                            Err(e) => {
+                            Err(_) => {
                                 return Err(Box::new(TribblerError::Unknown(
                                     "No update log found".to_string(),
                                 )))
@@ -353,7 +353,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                         name: self.name.clone(),
                         colon_escaped_name: self.colon_escaped_name.clone(),
                         clients: self.clients.clone(),
-                        bin_client: *locked_bin_client,
+                        bin_client: (*locked_bin_client).clone(),
                     };
                 } else {
                     // no live backend found, return error
@@ -460,8 +460,9 @@ impl storage::KeyString for Lab3BinStoreClient {
     }
 
     async fn keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.list_keys(&p).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.list_keys(&p).await?;
         Ok(result)
     }
 }
@@ -469,26 +470,30 @@ impl storage::KeyString for Lab3BinStoreClient {
 #[async_trait]
 impl storage::KeyList for Lab3BinStoreClient {
     async fn list_get(&self, key: &str) -> TribResult<storage::List> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.list_get(&key).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.list_get(&key).await?;
         Ok(result)
     }
 
     async fn list_append(&self, kv: &storage::KeyValue) -> TribResult<bool> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.list_append(&kv).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.list_append(&kv).await?;
         Ok(result)
     }
 
     async fn list_remove(&self, kv: &storage::KeyValue) -> TribResult<u32> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.list_remove(&kv).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.list_remove(&kv).await?;
         Ok(result)
     }
 
     async fn list_keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.list_keys(&p).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.list_keys(&p).await?;
         Ok(result)
     }
 }
@@ -496,8 +501,9 @@ impl storage::KeyList for Lab3BinStoreClient {
 #[async_trait]
 impl storage::Storage for Lab3BinStoreClient {
     async fn clock(&self, at_least: u64) -> TribResult<u64> {
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let result = cached_bin_store_client.clock(at_least).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let result = locked_bin_store_client.clock(at_least).await?;
         Ok(result)
     }
 }
