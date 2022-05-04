@@ -608,4 +608,5 @@ pub use crate::lab2::lab::serve_keeper;
 mod bin_store;
 mod bin_store_client;
 mod frontend;
+mod lab3_bin_store_client;
 mod storage_client;
