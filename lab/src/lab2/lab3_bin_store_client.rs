@@ -1,10 +1,10 @@
 // This is a wrapper over lab2_bin_store_client
 
-use std::cmp::Ordering;
-use std::sync::Arc;
-
 use crate::lab2::storage_client::StorageClient;
 use async_trait::async_trait;
+use std::cmp::Ordering;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tribbler::err::TribblerError;
@@ -23,9 +23,9 @@ pub struct Lab3BinStoreClient {
     pub colon_escaped_name: String,
     pub back_addrs: Vec<String>,
     pub clients: Vec<StorageClient>,
-    pub bin_store_client: std::sync::Mutex<BinStoreClient>,
-    pub bin_client: std::sync::Mutex<StorageClient>,
-    pub bin_client_index: std::sync::Mutex<usize>,
+    pub bin_store_client: Arc<Mutex<BinStoreClient>>,
+    pub bin_client: Arc<Mutex<StorageClient>>,
+    pub bin_client_index: Arc<Mutex<usize>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -86,87 +86,94 @@ impl PartialEq for UpdateLog {
 impl storage::KeyString for Lab3BinStoreClient {
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         // fetch log by forwarding request to bin_store_client. It will handle prepending name and handling bin part
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let storage::List(fetched_log) =
+            match locked_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                Ok(v) => v, // 1st shot return
+                Err(_) => {
+                    // 1st one didnt work; 2nd start
+                    // fetching logs is unsuccessful, try getting it from the next live backend. That is guaranteed to have the data
 
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let storage::List(fetched_log) = match cached_bin_store_client
-            .list_get(KEY_UPDATE_LOG)
-            .await
-        {
-            Ok(v) => v, // 1st shot return
-            Err(_) => {
-                // 1st one didnt work; 2nd start
-                // fetching logs is unsuccessful, try getting it from the next live backend. That is guaranteed to have the data
+                    // error then find next alive node
+                    // if err then backend crashed find next live
+                    let n = self.back_addrs.len() as u64;
 
-                // error then find next alive node
-                // if err then backend crashed find next live
-                let n = self.back_addrs.len() as u64;
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let locked_bin_client_index = clone_bin_client_index.lock().await;
+                    let curr_bin_client_index = *locked_bin_client_index;
 
-                let curr_bin_client_index = (*self.bin_client_index.lock().unwrap()).clone() as u64;
+                    let mut primary_backend_index = curr_bin_client_index;
 
-                let mut primary_backend_index = curr_bin_client_index;
+                    let mut is_primary_found = false;
 
-                let mut is_primary_found = false;
+                    for backend_index_iter in 0..n {
+                        let backend_addr = &self.back_addrs
+                            [((backend_index_iter + curr_bin_client_index as u64) % n) as usize]; // start from hashed_backend_index
 
-                for backend_index_iter in 0..n {
-                    let backend_addr = &self.back_addrs
-                        [((backend_index_iter + curr_bin_client_index) % n) as usize]; // start from hashed_backend_index
+                        let client = StorageClient {
+                            addr: format!("http://{}", backend_addr.clone())
+                                .as_str()
+                                .to_owned(),
+                            cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                        };
 
-                    let client = StorageClient {
-                        addr: format!("http://{}", backend_addr.clone())
-                            .as_str()
-                            .to_owned(),
-                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-                    };
+                        // perform clock() rpc call to check if the backend is alive
+                        match client.clock(0).await {
+                            Ok(_) => {
+                                primary_backend_index =
+                                    ((backend_index_iter + curr_bin_client_index as u64) % n)
+                                        as usize;
+                                is_primary_found = true;
+                                break;
+                            } // backend alive make it primary
+                            Err(_) => {} // backend not alive, continue iteration
+                        };
+                    }
 
-                    // perform clock() rpc call to check if the backend is alive
-                    match client.clock(0).await {
-                        Ok(_) => {
-                            primary_backend_index =
-                                (backend_index_iter + curr_bin_client_index) % n;
-                            is_primary_found = true;
-                            break;
-                        } // backend alive make it primary
-                        Err(_) => {} // backend not alive, continue iteration
-                    };
+                    if is_primary_found {
+                        // get a client to the primary backend
+                        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                        let mut locked_bin_client_index = clone_bin_client_index.lock().await;
+                        *locked_bin_client_index = primary_backend_index.clone() as usize; // STORAGE_CLIENT rename
+
+                        let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
+
+                        let clone_bin_client = Arc::clone(&self.bin_client);
+                        let mut locked_bin_client = clone_bin_client.lock().await;
+                        *locked_bin_client = StorageClient {
+                            addr: format!("http://{}", backend_addr.clone())
+                                .as_str()
+                                .to_owned(),
+                            cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                        };
+
+                        // generate corresponding BinStoreClient
+                        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                        let mut locked_bin_store_client = clone_bin_store_client.lock().await;
+                        *locked_bin_store_client = BinStoreClient {
+                            name: self.name.clone(),
+                            colon_escaped_name: self.colon_escaped_name.clone(),
+                            clients: self.clients.clone(),
+                            bin_client: *locked_bin_client,
+                        };
+
+                        match (*locked_bin_store_client).list_get(KEY_UPDATE_LOG).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return Err(Box::new(TribblerError::Unknown(
+                                    "No update log found".to_string(),
+                                )))
+                            }
+                        } // TODO: 3rd iteration, second live found but gone down while fetching log; then again iterate
+                    } else {
+                        // no live backend found, return error
+                        return Err(Box::new(TribblerError::Unknown(
+                            "No live backend found".to_string(),
+                        )));
+                    }
                 }
-
-                if is_primary_found {
-                    // get a client to the primary backend
-                    let mut mut_bin_client_index = self.bin_client_index.lock().unwrap();
-                    *mut_bin_client_index = primary_backend_index.clone() as usize; // STORAGE_CLIENT rename
-                    std::mem::drop(mut_bin_client_index);
-
-                    let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
-
-                    let mut mut_bin_client = self.bin_client.lock().unwrap();
-                    *mut_bin_client = StorageClient {
-                        addr: format!("http://{}", backend_addr.clone())
-                            .as_str()
-                            .to_owned(),
-                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-                    };
-                    std::mem::drop(mut_bin_client);
-
-                    // generate corresponding BinStoreClient
-                    let mut mut_bin_store_client = self.bin_store_client.lock().unwrap();
-                    *mut_bin_store_client = BinStoreClient {
-                        name: self.name.clone(),
-                        colon_escaped_name: self.colon_escaped_name.clone(),
-                        clients: self.clients.clone(),
-                        bin_client: (*self.bin_client.lock().unwrap()).clone(),
-                    };
-                    std::mem::drop(mut_bin_store_client);
-
-                    let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone();
-                    cached_bin_store_client.list_get(KEY_UPDATE_LOG).await? // TODO: 3rd iteration, second live found but gone down while fetching log; then again iterate
-                } else {
-                    // no live backend found, return error
-                    return Err(Box::new(TribblerError::Unknown(
-                        "No live backend found".to_string(),
-                    )));
-                }
-            }
-        };
+            };
 
         // regenerate data from log and serve query
         let mut deserialized_log: Vec<UpdateLog> = fetched_log
@@ -202,22 +209,24 @@ impl storage::KeyString for Lab3BinStoreClient {
         if return_value.eq("") {
             // TODO: 4th check, if this also fails then do iterative search for next live
             // get live backends list
-            let cached_bin_client = (*self.bin_client.lock().unwrap()).clone();
+            let clone_bin_client = Arc::clone(&self.bin_client);
+            let locked_bin_client = clone_bin_client.lock().await;
 
-            let live_backends_list = cached_bin_client // TODO: change to storage_client and
+            let live_backends_list = locked_bin_client // TODO: change to storage_client and
                 .list_get(KEY_LIVE_BACKENDS_LIST)
                 .await?;
 
             // iterate in live backends list, find the location of the primary and take the next as secondary
 
-            let cached_bin_client_index = (*self.bin_client_index.lock().unwrap()).clone(); // get cached value
-            let mut secondary_addr = self.back_addrs[self.bin_client_index].clone(); // initialize it to current primary address
+            let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+            let locked_bin_client_index = clone_bin_client_index.lock().await;
+            let mut secondary_addr = self.back_addrs[*locked_bin_client_index].clone(); // initialize it to current primary address
 
             //iterate over len modulo n
             let len_live_backends_list = live_backends_list.0.len() as usize;
             for live_index in 0..len_live_backends_list {
                 if live_backends_list.0[live_index as usize]
-                    .eq(self.back_addrs[cached_bin_client_index].clone().as_str())
+                    .eq(self.back_addrs[*locked_bin_client_index].clone().as_str())
                 {
                     secondary_addr =
                         live_backends_list.0[(live_index + 1) % len_live_backends_list].clone();
@@ -280,9 +289,9 @@ impl storage::KeyString for Lab3BinStoreClient {
 
     async fn set(&self, kv: &storage::KeyValue) -> TribResult<bool> {
         // check if self.bin_store_client is alive
-
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let new_seq_num_result = cached_bin_store_client.clock(0).await;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let new_seq_num_result = locked_bin_store_client.clock(0).await;
 
         match new_seq_num_result {
             Ok(_) => {} // continue
@@ -290,9 +299,9 @@ impl storage::KeyString for Lab3BinStoreClient {
                 // error then find next alive node
                 // if err then backend crashed find next live
                 let n = self.back_addrs.len() as u64;
-
-                let cached_bin_client_index = (*self.bin_client_index.lock().unwrap()).clone(); // get cached value
-                let curr_bin_client_index = cached_bin_client_index as u64;
+                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                let curr_bin_client_index = *locked_bin_client_index as u64;
 
                 let mut primary_backend_index = curr_bin_client_index;
 
@@ -323,30 +332,29 @@ impl storage::KeyString for Lab3BinStoreClient {
 
                 if is_primary_found {
                     // get a client to the primary backend
-                    let mut mut_bin_client_index = self.bin_client_index.lock().unwrap();
-                    *mut_bin_client_index = primary_backend_index.clone() as usize;
-                    std::mem::drop(mut_bin_client_index);
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let mut locked_bin_client_index = clone_bin_client_index.lock().await;
+                    *locked_bin_client_index = primary_backend_index.clone() as usize;
 
                     let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
 
-                    let mut mut_bin_client = self.bin_client.lock().unwrap();
-                    *mut_bin_client = StorageClient {
+                    let clone_bin_client = Arc::clone(&self.bin_client);
+                    let mut locked_bin_client = clone_bin_client.lock().await;
+                    *locked_bin_client = StorageClient {
                         addr: format!("http://{}", backend_addr.clone())
                             .as_str()
                             .to_owned(),
                         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
                     };
-                    std::mem::drop(mut_bin_client);
-
                     // generate corresponding BinStoreClient
-                    let mut mut_bin_store_client = self.bin_store_client.lock().unwrap();
-                    *mut_bin_store_client = BinStoreClient {
+                    let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                    let mut locked_bin_store_client = clone_bin_store_client.lock().await;
+                    *locked_bin_store_client = BinStoreClient {
                         name: self.name.clone(),
                         colon_escaped_name: self.colon_escaped_name.clone(),
                         clients: self.clients.clone(),
-                        bin_client: mut_bin_client.clone(),
+                        bin_client: *locked_bin_client,
                     };
-                    std::mem::drop(mut_bin_store_client);
                 } else {
                     // no live backend found, return error
                     return Err(Box::new(TribblerError::Unknown(
@@ -360,8 +368,9 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         // generate UpdateLog
         // get seq_num by calling clock() RPC
-        let cached_bin_store_client = (*self.bin_store_client.lock().unwrap()).clone(); // get cached value
-        let new_seq_num = cached_bin_store_client.clock(0).await?;
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let new_seq_num = locked_bin_store_client.clock(0).await?;
 
         let new_update_log = UpdateLog {
             seq_num: new_seq_num + 1, // TODO: no plus one here
@@ -381,7 +390,7 @@ impl storage::KeyString for Lab3BinStoreClient {
         };
 
         // list-append log
-        cached_bin_store_client.list_append(&log_append_kv).await?;
+        locked_bin_store_client.list_append(&log_append_kv).await?;
 
         // add this bin to primary list of the node
         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -389,25 +398,26 @@ impl storage::KeyString for Lab3BinStoreClient {
             value: self.name.clone(),
         };
 
-        cached_bin_store_client
+        locked_bin_store_client
             .list_append(&primary_list_append_kv)
             .await?;
 
         // also append log to secondary - the next in the live backends list
         // get live backends list
-        let live_backends_list = cached_bin_store_client
+        let live_backends_list = locked_bin_store_client
             .list_get(KEY_LIVE_BACKENDS_LIST)
             .await?; // TODO: storage client // TODO: do a third check on error or if no live found s
 
         // iterate in live backends list, find the location of the primary and take the next as secondary
-        let cached_bin_client_index = (*self.bin_client_index.lock().unwrap()).clone(); // get cached value
-        let mut secondary_addr = self.back_addrs[cached_bin_client_index].clone();
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let mut secondary_addr = self.back_addrs[*locked_bin_client_index].clone();
 
         //iterate over len modulo n
         let len_live_backends_list = live_backends_list.0.len() as usize;
         for live_index in 0..len_live_backends_list {
             if live_backends_list.0[live_index as usize]
-                .eq(self.back_addrs[cached_bin_client_index as usize]
+                .eq(self.back_addrs[*locked_bin_client_index as usize]
                     .clone()
                     .as_str())
             {

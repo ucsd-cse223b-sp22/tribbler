@@ -5,6 +5,7 @@ use ::tribbler::colon;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::{collections::hash_map::DefaultHasher, hash::Hasher};
+use tokio::sync::Mutex;
 use tribbler::err::{TribResult, TribblerError};
 use tribbler::storage;
 use tribbler::storage::Storage;
@@ -83,9 +84,9 @@ impl storage::BinStorage for BinStore {
                 colon_escaped_name: colon_escaped_name.clone(),
                 back_addrs: self.back_addrs.clone(),
                 clients: storage_clients.clone(),
-                bin_store_client: std::sync::Mutex::new(bin_store_client),
-                bin_client: std::sync::Mutex::new(client),
-                bin_client_index: std::sync::Mutex::new(primary_backend_index as usize),
+                bin_store_client: Arc::new(Mutex::new(bin_store_client)),
+                bin_client: Arc::new(Mutex::new(client)),
+                bin_client_index: Arc::new(Mutex::new(primary_backend_index as usize)),
             }))
         } else {
             // no live backend found, return error
