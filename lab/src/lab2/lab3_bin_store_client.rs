@@ -300,7 +300,7 @@ impl storage::KeyString for Lab3BinStoreClient {
 
                     // deserialize it
                     // regenerate data from log and serve query
-                    let mut deserialized_live_backends_map: LiveBackends =
+                    let deserialized_live_backends_map: LiveBackends =
                         serde_json::from_str(&live_backends_map)?;
 
                     // iterate in live backends list, start from location of the primary and take the next alive as secondary
@@ -493,9 +493,12 @@ impl storage::KeyString for Lab3BinStoreClient {
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
         let new_seq_num_result = locked_bin_store_client.clock(0).await;
+        let mut new_seq_num = 0;
 
         match new_seq_num_result {
-            Ok(_) => {} // continue
+            Ok(seq_num) => {
+                new_seq_num = seq_num;
+            } // note the new seq num and continue
             Err(_) => {
                 // error then find next alive node
 
@@ -557,6 +560,82 @@ impl storage::KeyString for Lab3BinStoreClient {
                         clients: self.clients.clone(),
                         bin_client: (*locked_bin_client).clone(),
                     };
+
+                    new_seq_num = match locked_bin_store_client.clock(0).await {
+                        Ok(seq_num) => seq_num,
+                        Err(_) => {
+                            // the newly found backend just failed. Try the next alive. This is guaranteed to success due to 30 sec diff betn failures
+                            let n = self.back_addrs.len() as u64;
+
+                            let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                            let locked_bin_client_index = clone_bin_client_index.lock().await;
+                            let curr_bin_client_index = *locked_bin_client_index as u64;
+
+                            let mut primary_backend_index = curr_bin_client_index;
+
+                            let mut is_primary_found = false;
+
+                            for backend_index_iter in 0..n {
+                                let backend_addr = &self.back_addrs
+                                    [((backend_index_iter + curr_bin_client_index) % n) as usize]; // start from curr bin client index
+
+                                let client = StorageClient {
+                                    addr: format!("http://{}", backend_addr.clone())
+                                        .as_str()
+                                        .to_owned(),
+                                    cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                                };
+
+                                // perform clock() rpc call to check if the backend is alive
+                                match client.clock(0).await {
+                                    Ok(_) => {
+                                        primary_backend_index =
+                                            (backend_index_iter + curr_bin_client_index) % n;
+                                        is_primary_found = true;
+                                        break;
+                                    } // backend alive make it primary
+                                    Err(_) => {} // backend not alive, continue iteration
+                                };
+                            }
+
+                            if is_primary_found {
+                                // get a client to the primary backend
+                                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                                let mut locked_bin_client_index =
+                                    clone_bin_client_index.lock().await;
+                                *locked_bin_client_index = primary_backend_index.clone() as usize;
+
+                                let backend_addr =
+                                    self.back_addrs[primary_backend_index as usize].clone();
+
+                                let clone_bin_client = Arc::clone(&self.bin_client);
+                                let mut locked_bin_client = clone_bin_client.lock().await;
+                                *locked_bin_client = StorageClient {
+                                    addr: format!("http://{}", backend_addr.clone())
+                                        .as_str()
+                                        .to_owned(),
+                                    cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                                };
+                                // generate corresponding BinStoreClient
+                                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                                let mut locked_bin_store_client =
+                                    clone_bin_store_client.lock().await;
+                                *locked_bin_store_client = BinStoreClient {
+                                    name: self.name.clone(),
+                                    colon_escaped_name: self.colon_escaped_name.clone(),
+                                    clients: self.clients.clone(),
+                                    bin_client: (*locked_bin_client).clone(),
+                                };
+
+                                locked_bin_store_client.clock(0).await? // this is guaranteed to succeed
+                            } else {
+                                // no live backend found, return error
+                                return Err(Box::new(TribblerError::Unknown(
+                                    "No live backend found".to_string(),
+                                )));
+                            }
+                        }
+                    }
                 } else {
                     // no live backend found, return error
                     return Err(Box::new(TribblerError::Unknown(
@@ -566,92 +645,95 @@ impl storage::KeyString for Lab3BinStoreClient {
             }
         };
 
-        // what if a backend dies right after above check?
-        // Need 2nd pass, that will be primary, guaranteed alive, store data there,
-        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        let locked_bin_store_client = clone_bin_store_client.lock().await;
-        let new_seq_num_result = locked_bin_store_client.clock(0).await;
+        // got a primary and a new seq num
 
-        match new_seq_num_result {
-            Ok(_) => {} // continue
-            Err(_) => {
-                // error then find next alive node
+        // what if the primary dies right after above check?
 
-                let n = self.back_addrs.len() as u64;
+        /* // Need 2nd pass, that will become primary, guaranteed alive, store data there,
+               let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+               let locked_bin_store_client = clone_bin_store_client.lock().await;
+               let new_seq_num_result = locked_bin_store_client.clock(0).await;
 
-                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-                let locked_bin_client_index = clone_bin_client_index.lock().await;
-                let curr_bin_client_index = *locked_bin_client_index as u64;
+               match new_seq_num_result {
+                   Ok(_) => {} // continue
+                   Err(_) => {
+                       // error then find next alive node
 
-                let mut primary_backend_index = curr_bin_client_index;
+                       let n = self.back_addrs.len() as u64;
 
-                let mut is_primary_found = false;
+                       let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                       let locked_bin_client_index = clone_bin_client_index.lock().await;
+                       let curr_bin_client_index = *locked_bin_client_index as u64;
 
-                for backend_index_iter in 0..n {
-                    let backend_addr = &self.back_addrs
-                        [((backend_index_iter + curr_bin_client_index) % n) as usize]; // start from curr bin client index
+                       let mut primary_backend_index = curr_bin_client_index;
 
-                    let client = StorageClient {
-                        addr: format!("http://{}", backend_addr.clone())
-                            .as_str()
-                            .to_owned(),
-                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-                    };
+                       let mut is_primary_found = false;
 
-                    // perform clock() rpc call to check if the backend is alive
-                    match client.clock(0).await {
-                        Ok(_) => {
-                            primary_backend_index =
-                                (backend_index_iter + curr_bin_client_index) % n;
-                            is_primary_found = true;
-                            break;
-                        } // backend alive make it primary
-                        Err(_) => {} // backend not alive, continue iteration
-                    };
-                }
+                       for backend_index_iter in 0..n {
+                           let backend_addr = &self.back_addrs
+                               [((backend_index_iter + curr_bin_client_index) % n) as usize]; // start from curr bin client index
 
-                if is_primary_found {
-                    // get a client to the primary backend
-                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-                    let mut locked_bin_client_index = clone_bin_client_index.lock().await;
-                    *locked_bin_client_index = primary_backend_index.clone() as usize;
+                           let client = StorageClient {
+                               addr: format!("http://{}", backend_addr.clone())
+                                   .as_str()
+                                   .to_owned(),
+                               cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                           };
 
-                    let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
+                           // perform clock() rpc call to check if the backend is alive
+                           match client.clock(0).await {
+                               Ok(_) => {
+                                   primary_backend_index =
+                                       (backend_index_iter + curr_bin_client_index) % n;
+                                   is_primary_found = true;
+                                   break;
+                               } // backend alive make it primary
+                               Err(_) => {} // backend not alive, continue iteration
+                           };
+                       }
 
-                    let clone_bin_client = Arc::clone(&self.bin_client);
-                    let mut locked_bin_client = clone_bin_client.lock().await;
-                    *locked_bin_client = StorageClient {
-                        addr: format!("http://{}", backend_addr.clone())
-                            .as_str()
-                            .to_owned(),
-                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-                    };
-                    // generate corresponding BinStoreClient
-                    let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-                    let mut locked_bin_store_client = clone_bin_store_client.lock().await;
-                    *locked_bin_store_client = BinStoreClient {
-                        name: self.name.clone(),
-                        colon_escaped_name: self.colon_escaped_name.clone(),
-                        clients: self.clients.clone(),
-                        bin_client: (*locked_bin_client).clone(),
-                    };
-                } else {
-                    // no live backend found, return error
-                    return Err(Box::new(TribblerError::Unknown(
-                        "No live backend found".to_string(),
-                    )));
-                }
-            }
-        };
+                       if is_primary_found {
+                           // get a client to the primary backend
+                           let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                           let mut locked_bin_client_index = clone_bin_client_index.lock().await;
+                           *locked_bin_client_index = primary_backend_index.clone() as usize;
 
-        // now primary is guaranteed to be alive
-        // generate UpdateLog
-        // get seq_num by calling clock() RPC
-        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        let locked_bin_store_client = clone_bin_store_client.lock().await;
+                           let backend_addr = self.back_addrs[primary_backend_index as usize].clone();
 
-        let new_seq_num = locked_bin_store_client.clock(0).await?;
+                           let clone_bin_client = Arc::clone(&self.bin_client);
+                           let mut locked_bin_client = clone_bin_client.lock().await;
+                           *locked_bin_client = StorageClient {
+                               addr: format!("http://{}", backend_addr.clone())
+                                   .as_str()
+                                   .to_owned(),
+                               cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                           };
+                           // generate corresponding BinStoreClient
+                           let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                           let mut locked_bin_store_client = clone_bin_store_client.lock().await;
+                           *locked_bin_store_client = BinStoreClient {
+                               name: self.name.clone(),
+                               colon_escaped_name: self.colon_escaped_name.clone(),
+                               clients: self.clients.clone(),
+                               bin_client: (*locked_bin_client).clone(),
+                           };
+                       } else {
+                           // no live backend found, return error
+                           return Err(Box::new(TribblerError::Unknown(
+                               "No live backend found".to_string(),
+                           )));
+                       }
+                   }
+               };
 
+               // now primary is guaranteed to be alive
+               // generate UpdateLog
+               // get seq_num by calling clock() RPC
+               let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+               let locked_bin_store_client = clone_bin_store_client.lock().await;
+
+               let new_seq_num = locked_bin_store_client.clock(0).await?;
+        */
         let new_update_log = UpdateLog {
             seq_num: new_seq_num, // DONE-TODO: no plus one here
             update_operation: UpdateOperation::Set,
@@ -673,7 +755,7 @@ impl storage::KeyString for Lab3BinStoreClient {
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
 
-        locked_bin_store_client.list_append(&log_append_kv).await?;
+        locked_bin_store_client.list_append(&log_append_kv).await?; // what if this fails
 
         // add this bin to primary list of the node - SHOULD this be before appending the log?
         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -686,7 +768,7 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         locked_bin_store_client
             .list_append(&primary_list_append_kv)
-            .await?;
+            .await?; // what if this fails?
 
         // what if primary is there but secondary fails in between writing? Need to write to next alive in the list.
 
@@ -695,9 +777,161 @@ impl storage::KeyString for Lab3BinStoreClient {
         let clone_bin_client = Arc::clone(&self.bin_client);
         let locked_bin_client = clone_bin_client.lock().await;
 
-        let live_backends_list_result = locked_bin_client.list_get(KEY_LIVE_BACKENDS_LIST).await; // DONE-TODO: use storage client
+        //let live_backends_list_result = locked_bin_client.list_get(KEY_LIVE_BACKENDS_LIST).await; // DONE-TODO: use storage client
 
-        // TODO: do a third iteration on error or if primary crashed in between. This iteration is to get the secondary
+        match locked_bin_client // DONE-TODO: change to storage_client
+            .get(KEY_LIVE_BACKENDS_LIST) // live backends list is a serialized KeyValue where value is a serialized map of backends and their alive status
+            .await
+        {
+            Ok(Some(live_backends_map)) => {
+                // Got live backends map, find the secondary and get data from there
+
+                // deserialize it
+                // regenerate data from log and serve query
+                let deserialized_live_backends_map: LiveBackends =
+                    serde_json::from_str(&live_backends_map)?;
+
+                // iterate in live backends list, start from location of the primary and take the next alive as secondary
+
+                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                let primary_backend_index = *locked_bin_client_index;
+
+                let mut secondary_addr = String::from(""); // initialize it to empty for now
+
+                //iterate over len modulo n
+                let len_live_backends_list =
+                    deserialized_live_backends_map.is_alive_list.len() as usize;
+                for live_index in 1..len_live_backends_list {
+                    // since primary is already found need to start from primary + 1 so start from index 1
+                    if deserialized_live_backends_map.is_alive_list
+                        [((live_index + primary_backend_index) % len_live_backends_list) as usize]
+                    {
+                        secondary_addr = deserialized_live_backends_map.backs[((live_index
+                            + primary_backend_index)
+                            % len_live_backends_list)
+                            as usize]
+                            .clone();
+                        break;
+                    }
+                }
+
+                if secondary_addr.eq("") {
+                    // no live secondary backend found, return error
+                    return Err(Box::new(TribblerError::Unknown(
+                        "No live secondary backend found".to_string(),
+                    )));
+                }
+
+                // generate storage client and bin store client for secondary
+                let secondary_bin_client = StorageClient {
+                    addr: format!("http://{}", secondary_addr.clone())
+                        .as_str()
+                        .to_owned(),
+                    cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                };
+
+                let secondary_bin_store_client = BinStoreClient {
+                    name: self.name.clone(),
+                    colon_escaped_name: self.colon_escaped_name.clone(),
+                    clients: self.clients.clone(),
+                    bin_client: secondary_bin_client,
+                };
+
+                // list-append log
+                secondary_bin_store_client
+                    .list_append(&log_append_kv)
+                    .await?; // what if this fails
+
+                // add this bin to secondary list of the node - SHOULD this be before appending the log?
+                let secondary_list_append_kv = tribbler::storage::KeyValue {
+                    key: KEY_SECONDARY_LIST.to_string().clone(),
+                    value: self.name.clone(),
+                };
+
+                secondary_bin_store_client
+                    .list_append(&secondary_list_append_kv)
+                    .await?; // what if this fails?
+            }
+            _ => {
+                // handle Ok(None) case as well
+                // DONE-TODO: 4th check, if getting live backends list also fails then do iterative search for secondary
+                let n = self.back_addrs.len() as u64;
+
+                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                let curr_bin_client_index = *locked_bin_client_index;
+
+                let mut secondary_backend_index = curr_bin_client_index;
+
+                let mut is_secondary_found = false;
+
+                for backend_index_iter in 0..n {
+                    let backend_addr = &self.back_addrs
+                        [((backend_index_iter + curr_bin_client_index as u64) % n) as usize]; // start from hashed_backend_index
+
+                    let client = StorageClient {
+                        addr: format!("http://{}", backend_addr.clone())
+                            .as_str()
+                            .to_owned(),
+                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                    };
+
+                    // perform clock() rpc call to check if the backend is alive
+                    match client.clock(0).await {
+                        Ok(_) => {
+                            secondary_backend_index =
+                                ((backend_index_iter + curr_bin_client_index as u64) % n) as usize;
+                            is_secondary_found = true;
+                            break;
+                        } // backend alive make it primary
+                        Err(_) => {} // backend not alive, continue iteration
+                    };
+                }
+
+                if is_secondary_found {
+                    // get a client to the secondary backend
+                    let secondary_addr = self.back_addrs[secondary_backend_index as usize].clone();
+
+                    // generate storage client and bin store client for secondary
+                    let secondary_bin_client = StorageClient {
+                        addr: format!("http://{}", secondary_addr.clone())
+                            .as_str()
+                            .to_owned(),
+                        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+                    };
+
+                    let secondary_bin_store_client = BinStoreClient {
+                        name: self.name.clone(),
+                        colon_escaped_name: self.colon_escaped_name.clone(),
+                        clients: self.clients.clone(),
+                        bin_client: secondary_bin_client,
+                    };
+
+                    // list-append log
+                    secondary_bin_store_client
+                        .list_append(&log_append_kv)
+                        .await?; // what if this fails
+
+                    // add this bin to secondary list of the node - SHOULD this be before appending the log?
+                    let secondary_list_append_kv = tribbler::storage::KeyValue {
+                        key: KEY_SECONDARY_LIST.to_string().clone(),
+                        value: self.name.clone(),
+                    };
+
+                    secondary_bin_store_client
+                        .list_append(&secondary_list_append_kv)
+                        .await?; // what if this fails?
+                } else {
+                    // no live backend found, return error
+                    return Err(Box::new(TribblerError::Unknown(
+                        "No live backend found".to_string(),
+                    )));
+                }
+            }
+        };
+
+        /* // TODO: do a third iteration on error or if primary crashed in between. This iteration is to get the secondary
         let live_backends_list = match live_backends_list_result {
             Ok(v) => v,
             Err(_) => {
@@ -824,7 +1058,7 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         secondary_bin_store_client
             .list_append(&secondary_list_append_kv)
-            .await?;
+            .await?; */
 
         Ok(true) // may keep a boolean variable to combine result of all
     }
