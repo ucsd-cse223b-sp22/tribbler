@@ -1,3 +1,9 @@
+// TODO
+// 1. allocation updation in run_keeper_heartbeat - done i think
+// 2. take care of wrap around cases
+// 3. Update _kp list after migration - done i think
+// 4. send live list to backends
+
 use crate::{
     keeper::{keeper_sync_client::KeeperSyncClient, keeper_sync_server::KeeperSyncServer},
     lab2::bin_store::BinStore,
@@ -30,7 +36,13 @@ use super::{
 
 // use super::{frontend::FrontEnd, storage_client::StorageClient};
 
-pub struct Allocation(i32, i32);
+pub struct Allocation {
+    pub start: i32,
+    pub end: i32,
+    pub is_alive: bool,
+}
+
+// static mut allocations: Vec<Allocation> = vec![];
 
 /// This function accepts a list of backend addresses, and returns a
 /// type which should implement the [BinStorage] trait to access the
@@ -70,7 +82,7 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
 
     // keeper.clone().sync_clocks_and_compute_live_bc();
 
-    // initial backend allocation code start
+    // initial backend allocation to keeper code start: NEED TO CHECK THIS
     let bc_len = kc.backs.len();
     let kp_len = kc.addrs.len();
 
@@ -80,17 +92,22 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     let mut curr_start = 0;
     for i in 0..kp_len {
         if curr_start >= bc_len {
-            allocations.push(Allocation(-1, (bc_len - 1) as i32));
+            allocations.push(Allocation {
+                start: -1,
+                end: (bc_len - 1) as i32,
+                is_alive: false,
+            });
             continue;
         } else {
-            allocations.push(Allocation(
-                curr_start as i32,
-                min((curr_start + n - 1) as i32, (bc_len - 1) as i32),
-            ));
+            allocations.push(Allocation {
+                start: curr_start as i32,
+                end: min((curr_start + n - 1) as i32, (bc_len - 1) as i32),
+                is_alive: true,
+            });
             curr_start += n;
         }
     }
-    // initial backend allocation code end
+    // initial backend allocation to keeper code end
     // 1 round keeper-backend
     // 1 round keeper-keeper
     // send ready signal
@@ -107,7 +124,10 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     handles.push(tokio::spawn(build_and_serve_keeper_server(keeper.clone())));
 
     // this thread periodically calls get_heartbeat on all keepers
-    handles.push(tokio::spawn(run_keeper_heartbeat(keeper.clone())));
+    handles.push(tokio::spawn(run_keeper_heartbeat(
+        keeper.clone(),
+        allocations,
+    )));
 
     handles.push(tokio::spawn(sync_clocks_and_compute_live_bc(keeper)));
 
@@ -251,12 +271,17 @@ async fn helper(keeper: Keeper, storage_clients: &Vec<StorageClient>) -> TribRes
             tokio::spawn(migrate_data_when_up(keeper.clone(), start + idx));
         }
     }
-    // keeper.migrate_data(idx).await?; // TODO: Spawn thread for this
 
     *max_clock_so_far.write().unwrap() += 1u64;
     let c = *max_clock_so_far.read().unwrap();
     for storage_client in storage_clients.iter() {
-        storage_client.clock(c + 1u64).await?; // TODO: Replace ? with match, continue if error
+        let clock_res = storage_client.clock(c + 1u64).await;
+        match clock_res {
+            Ok(_) => {}
+            Err(_) => {
+                continue;
+            }
+        };
     }
 
     Ok(())
@@ -274,11 +299,14 @@ pub async fn build_and_serve_keeper_server(keeper: Keeper) -> TribResult<()> {
     Ok(())
 }
 
-pub async fn run_keeper_heartbeat(mut keeper: Keeper) -> TribResult<()> {
+pub async fn run_keeper_heartbeat(
+    mut keeper: Keeper,
+    mut allocations: Vec<Allocation>,
+) -> TribResult<()> {
     let mut heartbeat_interval = interval(time::Duration::from_millis(1000)); // 1 second ticker
     let max_clock_so_far = Arc::clone(&keeper.max_clock_so_far);
     loop {
-        heartbeat_interval.tick();
+        heartbeat_interval.tick().await;
         for (keeper_idx, addr) in keeper.addrs.iter().enumerate() {
             if keeper_idx as u32 == keeper.index {
                 continue;
@@ -295,38 +323,86 @@ pub async fn run_keeper_heartbeat(mut keeper: Keeper) -> TribResult<()> {
                 keeper.cached_conn[keeper_idx] = Some(keeper_client);
             }
 
-            let heartbeat_res = keeper.cached_conn[keeper_idx]
+            // let heartbeat_res = keeper.cached_conn[keeper_idx]
+            //     .clone()
+            //     .unwrap()
+            //     .get_heartbeat(tonic::Request::new(()))
+            //     .await;
+
+            if let Ok(mut heartbeat) = keeper.cached_conn[keeper_idx]
                 .clone()
                 .unwrap()
                 .get_heartbeat(tonic::Request::new(()))
-                .await;
-            let mut heartbeat = match heartbeat_res {
-                Ok(heartbeat) => heartbeat,
-                Err(_) => {
-                    // trigger keeper reallocation process
-                    todo!()
+                .await
+            {
+                allocations[keeper_idx].is_alive = true;
+
+                *max_clock_so_far.write().unwrap() =
+                    if *max_clock_so_far.read().unwrap() < heartbeat.get_mut().max_clock {
+                        heartbeat.get_mut().max_clock
+                    } else {
+                        *max_clock_so_far.read().unwrap()
+                    };
+
+                let live_back_list: LiveBackends =
+                    serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
+                let first_back_index = heartbeat.get_mut().first_back_index;
+                let last_back_index = heartbeat.get_mut().last_back_index;
+
+                for i in first_back_index..last_back_index + 1 {
+                    let live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
+                    live_backends_list_bc.write().unwrap().backs[i as usize] =
+                        live_back_list.backs[i as usize].clone();
+                    live_backends_list_bc.write().unwrap().is_alive_list[i as usize] =
+                        live_back_list.is_alive_list[i as usize];
                 }
-            };
-
-            *max_clock_so_far.write().unwrap() =
-                if *max_clock_so_far.read().unwrap() < heartbeat.get_mut().max_clock {
-                    heartbeat.get_mut().max_clock
-                } else {
-                    *max_clock_so_far.read().unwrap()
-                };
-
-            let live_back_list: LiveBackends =
-                serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
-            let first_back_index = heartbeat.get_mut().first_back_index;
-            let last_back_index = heartbeat.get_mut().last_back_index;
-
-            for i in first_back_index..last_back_index + 1 {
-                let live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
-                live_backends_list_bc.write().unwrap().backs[i as usize] =
-                    live_back_list.backs[i as usize].clone();
-                live_backends_list_bc.write().unwrap().is_alive_list[i as usize] =
-                    live_back_list.is_alive_list[i as usize];
+            } else {
+                allocations[keeper_idx].is_alive = false;
             }
+
+            // TODO: Update keeper to backend allocations
+            let kp_len = keeper.addrs.len();
+            let my_end_index = Arc::clone(&keeper.last_bc_index);
+            let mut end_index = my_end_index.write().unwrap();
+            for j in 1..kp_len {
+                if !allocations[(keeper.index as usize + j) % kp_len].is_alive {
+                    *end_index = allocations[(keeper.index as usize + j) % kp_len].end as u32;
+                } else {
+                    *end_index =
+                        (allocations[(keeper.index as usize + j) % kp_len].start - 1) as u32;
+                }
+            }
+
+            // let mut heartbeat = match heartbeat_res {
+            //     Ok(heartbeat) => {
+            //         allocations[keeper_idx].is_alive = true;
+            //         heartbeat
+            //     }
+            //     Err(_) => {
+            //         // trigger keeper reallocation process; this will be handled by the
+            //         todo!()
+            //     }
+            // };
+
+            // *max_clock_so_far.write().unwrap() =
+            //     if *max_clock_so_far.read().unwrap() < heartbeat.get_mut().max_clock {
+            //         heartbeat.get_mut().max_clock
+            //     } else {
+            //         *max_clock_so_far.read().unwrap()
+            //     };
+
+            // let live_back_list: LiveBackends =
+            //     serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
+            // let first_back_index = heartbeat.get_mut().first_back_index;
+            // let last_back_index = heartbeat.get_mut().last_back_index;
+
+            // for i in first_back_index..last_back_index + 1 {
+            //     let live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
+            //     live_backends_list_bc.write().unwrap().backs[i as usize] =
+            //         live_back_list.backs[i as usize].clone();
+            //     live_backends_list_bc.write().unwrap().is_alive_list[i as usize] =
+            //         live_back_list.is_alive_list[i as usize];
+            // }
         }
         *max_clock_so_far.write().unwrap() += 1;
     }
@@ -522,6 +598,9 @@ pub async fn migrate_data(keeper: Keeper, storage_client_idx: usize) -> TribResu
         // let reserialized_log = serde_json::to_string(&deserialized_log)?;
     }
 
+    let mut live_backends_list_kp = keeper.live_backends_list_kp.write().unwrap();
+    live_backends_list_kp.is_alive_list[target_storage_client as usize] = false;
+
     Ok(())
 }
 
@@ -651,7 +730,6 @@ pub async fn migrate_data_when_up(keeper: Keeper, up_storage_client_idx: usize) 
         if (hash % n) as u32 > target_storage_client {
             continue;
         }
-        let backend_addr = &keeper.backs[(hash % n) as usize];
 
         let mut colon_escaped_name: String = colon::escape(bin_name.clone()).to_owned();
         colon_escaped_name.push_str(&"::".to_string());
@@ -723,6 +801,9 @@ pub async fn migrate_data_when_up(keeper: Keeper, up_storage_client_idx: usize) 
 
         // let reserialized_log = serde_json::to_string(&deserialized_log)?;
     }
+
+    let mut live_backends_list_kp = keeper.live_backends_list_kp.write().unwrap();
+    live_backends_list_kp.is_alive_list[target_storage_client as usize] = true;
 
     Ok(())
 }
