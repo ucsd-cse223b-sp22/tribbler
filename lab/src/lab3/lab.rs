@@ -4,19 +4,27 @@ use crate::{
 };
 use std::{
     cmp::min,
+    collections::{hash_map::DefaultHasher, HashSet},
+    hash::Hasher,
     mem,
     sync::{Arc, Mutex, RwLock},
 };
 use tokio::time::{self, interval};
 use tribbler::{
+    colon,
     config::KeeperConfig,
     err::TribResult,
-    storage::{BinStorage, Storage},
+    storage::{self, BinStorage, KeyList, Storage},
     trib::Server,
 };
 
 use super::{
-    frontend::FrontEnd, keeper_impl::Keeper, lab3_bin_store_client::LiveBackends,
+    bin_store_client::BinStoreClient,
+    frontend::FrontEnd,
+    keeper_impl::Keeper,
+    lab3_bin_store_client::{
+        LiveBackends, UpdateLog, KEY_PRIMARY_LIST, KEY_SECONDARY_LIST, KEY_UPDATE_LOG,
+    },
     storage_client::StorageClient,
 };
 
@@ -101,9 +109,7 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     // this thread periodically calls get_heartbeat on all keepers
     handles.push(tokio::spawn(run_keeper_heartbeat(keeper.clone())));
 
-    handles.push(tokio::spawn(sync_clocks_and_compute_live_bc(
-        keeper.clone(),
-    )));
+    handles.push(tokio::spawn(sync_clocks_and_compute_live_bc(keeper)));
 
     if let Some(mut rx) = kc.shutdown {
         rx.recv().await;
@@ -195,18 +201,25 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Keeper) -> TribResult<()> {
     }
 }
 
-async fn helper(mut keeper: Keeper, storage_clients: &Vec<StorageClient>) -> TribResult<()> {
+async fn helper(keeper: Keeper, storage_clients: &Vec<StorageClient>) -> TribResult<()> {
     let max_clock_so_far = Arc::clone(&keeper.max_clock_so_far);
     let c = *max_clock_so_far.read().unwrap();
+
+    let my_live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
+    let my_live_backends_list_kp = Arc::clone(&keeper.live_backends_list_kp);
+
+    let mut live_backends_list_bc = (*my_live_backends_list_bc.write().unwrap()).clone();
+
+    let start = *keeper.first_bc_index.read().unwrap() as usize;
+    let end = *keeper.last_bc_index.read().unwrap() as usize;
+
     for (idx, storage_client) in storage_clients.iter().enumerate() {
-        let mut live_backends_list_bc = keeper.live_backends_list_bc.write().unwrap();
-        let offset = *keeper.first_bc_index.read().unwrap() as usize;
-        live_backends_list_bc.backs[offset + idx] = storage_client.addr.clone();
+        live_backends_list_bc.backs[start + idx] = storage_client.addr.clone(); // take care of wrap around
 
         let storage_client_clock = storage_client.clock(c + 1u64).await;
         match storage_client_clock {
             Ok(clock_val) => {
-                live_backends_list_bc.is_alive_list[offset + idx] = true;
+                live_backends_list_bc.is_alive_list[start + idx] = true;
                 *max_clock_so_far.write().unwrap() =
                     if *max_clock_so_far.read().unwrap() < clock_val {
                         clock_val
@@ -217,27 +230,25 @@ async fn helper(mut keeper: Keeper, storage_clients: &Vec<StorageClient>) -> Tri
             Err(_) => {
                 // trigger migration procedure only if there is a mismatch with _kp list
                 // compute live_bc_list
-                live_backends_list_bc.is_alive_list[offset + idx] = false;
+                live_backends_list_bc.is_alive_list[start + idx] = false;
             }
         }
     }
 
-    let live_backends_list_bc = keeper.live_backends_list_bc.read().unwrap();
-    let live_backends_list_kp = keeper.live_backends_list_kp.read().unwrap();
-    let start = *keeper.first_bc_index.read().unwrap() as usize;
-    let end = *keeper.last_bc_index.read().unwrap() as usize;
-    for (idx, bc_elem) in &mut live_backends_list_bc.is_alive_list[start..end]
+    let live_backends_list_bc_read = (*my_live_backends_list_bc.read().unwrap()).clone();
+    let live_backends_list_kp_read = (*my_live_backends_list_kp.read().unwrap()).clone();
+
+    for (idx, bc_elem) in &mut live_backends_list_bc_read.is_alive_list[start..end]
         .iter()
         .enumerate()
     {
-        let kp_elem = live_backends_list_kp.is_alive_list[start..end][idx];
+        let kp_elem = live_backends_list_kp_read.is_alive_list[start..end][idx]; // take care of wrap around
         if !(*bc_elem) && kp_elem {
             // backend went down
-            tokio::spawn(sync_clocks_and_compute_live_bc(keeper.clone()))
-            //keeper.clone().migrate_data(start + idx).await?
+            tokio::spawn(migrate_data(keeper.clone(), start + idx));
         } else if *bc_elem && !kp_elem {
             // backend came up
-            keeper.clone().migrate_data_when_up(start + idx).await?
+            tokio::spawn(migrate_data_when_up(keeper.clone(), start + idx));
         }
     }
     // keeper.migrate_data(idx).await?; // TODO: Spawn thread for this
@@ -319,6 +330,412 @@ pub async fn run_keeper_heartbeat(mut keeper: Keeper) -> TribResult<()> {
         }
         *max_clock_so_far.write().unwrap() += 1;
     }
+}
+
+pub async fn migrate_data(keeper: Keeper, storage_client_idx: usize) -> TribResult<()> {
+    // Backend failure
+    let target_storage_client = *keeper.first_bc_index.read().unwrap() + storage_client_idx as u32;
+    let sc_i_plus_1 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client + 1) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    // let bin_store_client_i_plus_1 = BinStoreClient {
+    //     name: String,
+    //     colon_escaped_name: String,
+    //     clients: Vec<StorageClient>,
+    //     bin_client: sc_i_plus_1,
+    // };
+
+    let sc_i_minus_1 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client - 1) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    // let bin_store_client_i_minus_1 = BinStoreClient {
+    //     name: String,
+    //     colon_escaped_name: String,
+    //     clients: Vec<StorageClient>,
+    //     bin_client: sc_i_minus_1,
+    // };
+
+    let sc_i_plus_2 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client + 2) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    // let bin_store_client_i_plus_2 = BinStoreClient {
+    //     name: String,
+    //     colon_escaped_name: String,
+    //     clients: Vec<StorageClient>,
+    //     bin_client: sc_i_plus_2,
+    // };
+
+    let sc_i_plus_1_secondary_list = sc_i_plus_1.list_get(KEY_SECONDARY_LIST).await?;
+    let mut bin_name_hashset = HashSet::new();
+
+    for bin_name in sc_i_plus_1_secondary_list.0 {
+        if bin_name_hashset.contains(&bin_name) {
+            continue;
+        } else {
+            bin_name_hashset.insert(bin_name.clone());
+        }
+        let mut colon_escaped_name: String = colon::escape(bin_name.clone()).to_owned();
+        colon_escaped_name.push_str(&"::".to_string());
+
+        let bin_store_client_i_plus_1 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_plus_1.clone(),
+        };
+
+        let bin_store_client_i_plus_2 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_plus_2.clone(),
+        };
+
+        let storage::List(fetched_log) = bin_store_client_i_plus_1.list_get(KEY_UPDATE_LOG).await?; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+        // regenerate data from log and serve query
+        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+            .iter()
+            .map(|x| serde_json::from_str(&x).unwrap())
+            .collect::<Vec<UpdateLog>>();
+
+        // sort the deserialized log as per timestamp
+        // keep the fields in the required order so that they are sorted in that same order.
+        deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+        deserialized_log = remove_duplicates_from_log(deserialized_log);
+        // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+        // Based on the output of the set operations, generate result for the requested get op and return
+        // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+        // just need to keep track of seq_num to avoid considering duplicate ops in log
+        //let mut max_seen_seq_num = 0u64;
+
+        //let mut reserialized_log = vec![];
+        for log in deserialized_log {
+            let serialized_log_elem = serde_json::to_string(&log)?;
+
+            let append_kv = storage::KeyValue {
+                key: bin_name.clone(),
+                value: serialized_log_elem,
+            };
+
+            bin_store_client_i_plus_2.list_append(&append_kv).await?;
+        }
+
+        // append binname to secondary list
+        let bin_name_append_kv = storage::KeyValue {
+            key: KEY_SECONDARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i_plus_2.list_append(&bin_name_append_kv).await?;
+
+        // move the keys from secondary list of sc_i+1 to primary list to make it a primary for those keys
+        let primary_move_kv = storage::KeyValue {
+            key: KEY_PRIMARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i_plus_1.list_append(&primary_move_kv).await?;
+        sc_i_plus_1.list_remove(&bin_name_append_kv).await?;
+
+        // let reserialized_log = serde_json::to_string(&deserialized_log)?;
+    }
+
+    // create a second copy of primary data in i-1 in i+1
+    let sc_i_minus_1_primary_list = sc_i_minus_1.list_get(KEY_PRIMARY_LIST).await?;
+    let mut bin_name_hashset = HashSet::new();
+
+    for bin_name in sc_i_minus_1_primary_list.0 {
+        if bin_name_hashset.contains(&bin_name) {
+            continue;
+        } else {
+            bin_name_hashset.insert(bin_name.clone());
+        }
+
+        let mut colon_escaped_name: String = colon::escape(bin_name.clone()).to_owned();
+        colon_escaped_name.push_str(&"::".to_string());
+
+        let bin_store_client_i_minus_1 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_minus_1.clone(),
+        };
+
+        let bin_store_client_i_plus_1 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_plus_1.clone(),
+        };
+
+        let storage::List(fetched_log) =
+            bin_store_client_i_minus_1.list_get(KEY_UPDATE_LOG).await?; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+        // regenerate data from log and serve query
+        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+            .iter()
+            .map(|x| serde_json::from_str(&x).unwrap())
+            .collect::<Vec<UpdateLog>>();
+
+        // sort the deserialized log as per timestamp
+        // keep the fields in the required order so that they are sorted in that same order.
+        deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+        deserialized_log = remove_duplicates_from_log(deserialized_log);
+        // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+        // Based on the output of the set operations, generate result for the requested get op and return
+        // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+        // just need to keep track of seq_num to avoid considering duplicate ops in log
+        //let mut max_seen_seq_num = 0u64;
+
+        //let mut reserialized_log = vec![];
+        for log in deserialized_log {
+            let serialized_log_elem = serde_json::to_string(&log)?;
+
+            let append_kv = storage::KeyValue {
+                key: bin_name.clone(),
+                value: serialized_log_elem,
+            };
+
+            bin_store_client_i_plus_1.list_append(&append_kv).await?;
+        }
+
+        // append binname to secondary list
+        let bin_name_append_kv = storage::KeyValue {
+            key: KEY_SECONDARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i_plus_1.list_append(&bin_name_append_kv).await?;
+
+        // let reserialized_log = serde_json::to_string(&deserialized_log)?;
+    }
+
+    Ok(())
+}
+
+pub async fn migrate_data_when_up(keeper: Keeper, up_storage_client_idx: usize) -> TribResult<()> {
+    let target_storage_client =
+        *keeper.first_bc_index.read().unwrap() + up_storage_client_idx as u32;
+    let sc_i_plus_1 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client + 1) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let sc_i = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let sc_i_minus_1 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client - 1) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let sc_i_plus_2 = StorageClient {
+        addr: format!(
+            "http://{}",
+            keeper.backs[((target_storage_client + 2) % keeper.backs.len() as u32) as usize]
+        ),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let sc_i_minus_1_primary_list = sc_i_minus_1.list_get(KEY_PRIMARY_LIST).await?;
+    let mut bin_name_hashset = HashSet::new();
+
+    for bin_name in sc_i_minus_1_primary_list.0 {
+        if bin_name_hashset.contains(&bin_name) {
+            continue;
+        } else {
+            bin_name_hashset.insert(bin_name.clone());
+        }
+
+        let mut colon_escaped_name: String = colon::escape(bin_name.clone()).to_owned();
+        colon_escaped_name.push_str(&"::".to_string());
+
+        let bin_store_client_i_minus_1 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_minus_1.clone(),
+        };
+
+        let bin_store_client_i = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i.clone(),
+        };
+
+        let storage::List(fetched_log) =
+            bin_store_client_i_minus_1.list_get(KEY_UPDATE_LOG).await?; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+        // regenerate data from log and serve query
+        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+            .iter()
+            .map(|x| serde_json::from_str(&x).unwrap())
+            .collect::<Vec<UpdateLog>>();
+
+        // sort the deserialized log as per timestamp
+        // keep the fields in the required order so that they are sorted in that same order.
+        deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+        deserialized_log = remove_duplicates_from_log(deserialized_log);
+        // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+        // Based on the output of the set operations, generate result for the requested get op and return
+        // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+        // just need to keep track of seq_num to avoid considering duplicate ops in log
+        //let mut max_seen_seq_num = 0u64;
+
+        //let mut reserialized_log = vec![];
+        for log in deserialized_log {
+            let serialized_log_elem = serde_json::to_string(&log)?;
+
+            let append_kv = storage::KeyValue {
+                key: bin_name.clone(),
+                value: serialized_log_elem,
+            };
+
+            bin_store_client_i.list_append(&append_kv).await?;
+        }
+
+        // append binname to secondary list
+        let bin_name_append_kv = storage::KeyValue {
+            key: KEY_SECONDARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i.list_append(&bin_name_append_kv).await?;
+
+        sc_i_plus_1.list_remove(&bin_name_append_kv).await?;
+
+        // let reserialized_log = serde_json::to_string(&deserialized_log)?;
+    }
+
+    // Recovery step 1
+    let sc_i_plus_1_primary_list = sc_i_plus_1.list_get(KEY_PRIMARY_LIST).await?;
+    let mut bin_name_hashset = HashSet::new();
+
+    let n = keeper.backs.len() as u64;
+    let mut hasher = DefaultHasher::new();
+
+    for bin_name in sc_i_plus_1_primary_list.0 {
+        if bin_name_hashset.contains(&bin_name) {
+            continue;
+        } else {
+            bin_name_hashset.insert(bin_name.clone());
+        }
+
+        hasher.write(bin_name.clone().as_bytes());
+
+        let hash = hasher.finish();
+        if (hash % n) as u32 > target_storage_client {
+            continue;
+        }
+        let backend_addr = &keeper.backs[(hash % n) as usize];
+
+        let mut colon_escaped_name: String = colon::escape(bin_name.clone()).to_owned();
+        colon_escaped_name.push_str(&"::".to_string());
+
+        let bin_store_client_i_plus_1 = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i_plus_1.clone(),
+        };
+
+        let bin_store_client_i = BinStoreClient {
+            name: bin_name.clone(),
+            colon_escaped_name: colon_escaped_name.clone(),
+            clients: vec![], // TODO: Check later
+            bin_client: sc_i.clone(),
+        };
+
+        let storage::List(fetched_log) = bin_store_client_i_plus_1.list_get(KEY_UPDATE_LOG).await?; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+        // regenerate data from log and serve query
+        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+            .iter()
+            .map(|x| serde_json::from_str(&x).unwrap())
+            .collect::<Vec<UpdateLog>>();
+
+        // sort the deserialized log as per timestamp
+        // keep the fields in the required order so that they are sorted in that same order.
+        deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+        deserialized_log = remove_duplicates_from_log(deserialized_log);
+        // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+        // Based on the output of the set operations, generate result for the requested get op and return
+        // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+        // just need to keep track of seq_num to avoid considering duplicate ops in log
+        //let mut max_seen_seq_num = 0u64;
+
+        //let mut reserialized_log = vec![];
+        for log in deserialized_log {
+            let serialized_log_elem = serde_json::to_string(&log)?;
+
+            let append_kv = storage::KeyValue {
+                key: bin_name.clone(),
+                value: serialized_log_elem,
+            };
+
+            bin_store_client_i.list_append(&append_kv).await?;
+        }
+
+        // append binname to secondary list
+        let bin_name_append_kv = storage::KeyValue {
+            key: KEY_PRIMARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i.list_append(&bin_name_append_kv).await?;
+
+        let bin_name_move_primary_to_secondary = storage::KeyValue {
+            key: KEY_SECONDARY_LIST.to_string().clone(),
+            value: bin_name.clone(),
+        };
+        sc_i_plus_1
+            .list_append(&bin_name_move_primary_to_secondary)
+            .await?;
+        sc_i_plus_1.list_remove(&bin_name_append_kv).await?;
+
+        sc_i_plus_2
+            .list_remove(&bin_name_move_primary_to_secondary)
+            .await?;
+
+        // let reserialized_log = serde_json::to_string(&deserialized_log)?;
+    }
+
+    Ok(())
+}
+
+fn remove_duplicates_from_log(log: Vec<UpdateLog>) -> Vec<UpdateLog> {
+    let max_seen_seq_num = 0;
+    let mut ret_vec = vec![];
+    for item in log {
+        if item.seq_num > max_seen_seq_num {
+            ret_vec.push(item);
+        }
+    }
+    return ret_vec;
 }
 
 /// this function accepts a [BinStorage] client which should be used in order to
