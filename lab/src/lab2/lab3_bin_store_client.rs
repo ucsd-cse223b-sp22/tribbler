@@ -79,37 +79,33 @@ struct LiveBackends {
 }
 
 impl Lab3BinStoreClient {
-    async fn find_next_iter(&self) -> TribResult<BinStoreClient> {
-        log::info!("In find_next_iter()");
+    async fn find_next_iter(&self, curr_bin_client_index: usize) -> TribResult<BinStoreClient> {
+        //log::info!("In find_next_iter()");
 
         let n = self.back_addrs.len() as u64;
 
-        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        let locked_bin_client_index = clone_bin_client_index.lock().await;
-        let curr_bin_client_index = *locked_bin_client_index;
-
-        log::info!(
-            "In find_next_iter()::curr_bin_client_index: {}",
-            &curr_bin_client_index
-        );
+        // log::info!(
+        //     "In find_next_iter()::curr_bin_client_index: {}",
+        //     &curr_bin_client_index
+        // );
 
         let mut primary_backend_index = curr_bin_client_index;
 
         let mut is_next_live_found = false;
 
         for backend_index_iter in 0..n {
-            log::info!(
-                "In find_next_iter()::iteration: {}",
-                backend_index_iter + curr_bin_client_index as u64
-            );
+            // log::info!(
+            //     "In find_next_iter()::iteration: {}",
+            //     backend_index_iter + curr_bin_client_index as u64
+            // );
 
             let backend_addr = &self.back_addrs
                 [((backend_index_iter + curr_bin_client_index as u64) % n) as usize]; // start from hashed_backend_index
 
-            log::info!(
-                "In find_next_iter()::backend_addr: {}",
-                backend_addr.clone()
-            );
+            // log::info!(
+            //     "In find_next_iter()::backend_addr: {}",
+            //     backend_addr.clone()
+            // );
 
             let client = StorageClient {
                 addr: format!("http://{}", backend_addr.clone())
@@ -121,7 +117,7 @@ impl Lab3BinStoreClient {
             // perform clock() rpc call to check if the backend is alive
             match client.clock(0).await {
                 Ok(_) => {
-                    log::info!("In find_next_iter()::getting clock val");
+                    // log::info!("In find_next_iter()::getting clock val");
 
                     primary_backend_index =
                         ((backend_index_iter + curr_bin_client_index as u64) % n) as usize;
@@ -133,23 +129,24 @@ impl Lab3BinStoreClient {
         }
 
         if is_next_live_found {
-            log::info!("In find_next_iter()::next_alive_found",);
+            // log::info!("In find_next_iter()::next_alive_found",);
 
             // get a client to the primary backend
             let clone_bin_client_index = Arc::clone(&self.bin_client_index);
             let mut locked_bin_client_index = clone_bin_client_index.lock().await;
 
-            log::info!(
-                "In find_next_iter()::primary_index: {}",
-                primary_backend_index.clone()
-            );
+            // log::info!(
+            //     "In find_next_iter()::primary_index: {}",
+            //     primary_backend_index.clone()
+            // );
 
             *locked_bin_client_index = primary_backend_index.clone() as usize;
 
-            log::info!(
-                "In find_next_iter()::primary_backend_index: {}",
-                (*locked_bin_client_index).clone()
-            );
+            // log::info!(
+            //     "In find_next_iter()::primary_backend_index: {}",
+            //     (*locked_bin_client_index).clone()
+            // );
+            std::mem::drop(locked_bin_client_index);
 
             let backend_addr = &self.back_addrs[primary_backend_index as usize].clone();
 
@@ -189,8 +186,10 @@ impl Lab3BinStoreClient {
     async fn find_next_from_live_list(&self) -> TribResult<BinStoreClient> {
         let clone_bin_client = Arc::clone(&self.bin_client);
         let locked_bin_client = clone_bin_client.lock().await;
+        let cached_bin_client = (*locked_bin_client).clone();
+        std::mem::drop(locked_bin_client);
 
-        match (*locked_bin_client) // DONE-TODO: change to storage_client
+        match cached_bin_client // DONE-TODO: change to storage_client
             .get(KEY_LIVE_BACKENDS_LIST) // live backends list is a serialized KeyValue where value is a serialized map of backends and their alive status
             .await
         {
@@ -205,6 +204,7 @@ impl Lab3BinStoreClient {
                 let clone_bin_client_index = Arc::clone(&self.bin_client_index);
                 let locked_bin_client_index = clone_bin_client_index.lock().await;
                 let primary_backend_index = *locked_bin_client_index;
+                std::mem::drop(locked_bin_client_index);
 
                 let mut secondary_addr = String::from(""); // initialize it to empty for now
 
@@ -274,9 +274,14 @@ impl storage::KeyString for Lab3BinStoreClient {
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         // fetch log by forwarding request to bin_store_client. It will handle prepending name and handling bin part
 
-        log::info!("In get");
+        //log::info!("In get");
 
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -291,13 +296,21 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let cached_bin_store_client = (*locked_bin_store_client).clone();
+        std::mem::drop(locked_bin_store_client);
 
         let storage::List(fetched_log) =
-            match locked_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+            match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
                 Ok(v) => v, // 1st shot, got log
                 Err(_) => {
                     // A live backend just crashed; 2nd attempt by iterating through the list to find the next alive
-                    let _ = match self.find_next_iter().await {
+
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let locked_bin_client_index = clone_bin_client_index.lock().await;
+                    let curr_bin_client_index = *locked_bin_client_index;
+                    std::mem::drop(locked_bin_client_index);
+
+                    let _ = match self.find_next_iter(curr_bin_client_index).await {
                         Ok(val) => val,
                         Err(_) => {
                             // no live backend found, return error
@@ -309,8 +322,10 @@ impl storage::KeyString for Lab3BinStoreClient {
 
                     let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                     let locked_bin_store_client = clone_bin_store_client.lock().await;
+                    let cached_bin_store_client = (*locked_bin_store_client).clone();
+                    std::mem::drop(locked_bin_store_client);
 
-                    match (*locked_bin_store_client).list_get(KEY_UPDATE_LOG).await {
+                    match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
                         Ok(v) => v, // got the log
                         Err(_) => {
                             // this should return error
@@ -359,7 +374,13 @@ impl storage::KeyString for Lab3BinStoreClient {
                 Ok(val) => val,
                 Err(_) => {
                     // iterate all if live backends list not able to give secondary
-                    match self.find_next_iter().await {
+
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let locked_bin_client_index = clone_bin_client_index.lock().await;
+                    let curr_bin_client_index = *locked_bin_client_index;
+                    std::mem::drop(locked_bin_client_index);
+
+                    match self.find_next_iter(curr_bin_client_index + 1).await {
                         Ok(val) => val,
                         Err(_) => {
                             // no live backend found, return None since a backend exists but doesn't have data
@@ -416,7 +437,12 @@ impl storage::KeyString for Lab3BinStoreClient {
     async fn set(&self, kv: &storage::KeyValue) -> TribResult<bool> {
         log::info!("In set");
 
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -428,10 +454,12 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let cached_bin_store_client = (*locked_bin_store_client).clone();
+        std::mem::drop(locked_bin_store_client);
 
-        match locked_bin_store_client.clock(0).await {
+        match cached_bin_store_client.clock(0).await {
             Ok(seq_num) => {
-                log::info!("1st success");
+                // log::info!("1st success");
 
                 // note the new seq num and continue to list append here itself
                 let new_update_log = UpdateLog {
@@ -454,11 +482,13 @@ impl storage::KeyString for Lab3BinStoreClient {
                 // list-append log
                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                 let locked_bin_store_client = clone_bin_store_client.lock().await;
+                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                std::mem::drop(locked_bin_store_client);
 
-                let _ = match locked_bin_store_client.list_append(&log_append_kv).await {
+                let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
                     Ok(_) => {
                         // clock and primary append is successful
-                        log::info!("2 success");
+                        // log::info!("2 success");
 
                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -466,30 +496,39 @@ impl storage::KeyString for Lab3BinStoreClient {
                             value: self.name.clone(),
                         };
 
-                        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-                        let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let clone_bin_client = Arc::clone(&self.bin_client);
+                        let locked_bin_client = clone_bin_client.lock().await;
+                        let cached_bin_client = (*locked_bin_client).clone();
+                        std::mem::drop(locked_bin_client);
 
-                        let _ = match locked_bin_store_client
-                            .list_append(&primary_list_append_kv)
-                            .await
-                        {
+                        let _ = match cached_bin_client.list_append(&primary_list_append_kv).await {
                             Ok(_) => {
                                 // clock, primary append and primary list username append all success
                                 // append to secondary
-                                let secondary_bin_store_client =
-                                    match self.find_next_from_live_list().await {
-                                        Ok(val) => val,
-                                        Err(_) => {
-                                            // iterate all if live backends list not able to give secondary
-                                            match self.find_next_iter().await {
-                                                Ok(val) => val,
-                                                Err(_) => {
-                                                    // no live backend found, return None since already written to primary
-                                                    return Ok(true);
-                                                }
+                                let secondary_bin_store_client = match self
+                                    .find_next_from_live_list()
+                                    .await
+                                {
+                                    Ok(val) => val,
+                                    Err(_) => {
+                                        // iterate all if live backends list not able to give secondary
+
+                                        let clone_bin_client_index =
+                                            Arc::clone(&self.bin_client_index);
+                                        let locked_bin_client_index =
+                                            clone_bin_client_index.lock().await;
+                                        let curr_bin_client_index = *locked_bin_client_index;
+                                        std::mem::drop(locked_bin_client_index);
+
+                                        match self.find_next_iter(curr_bin_client_index + 1).await {
+                                            Ok(val) => val,
+                                            Err(_) => {
+                                                // no live backend found, return None since already written to primary
+                                                return Ok(true);
                                             }
                                         }
-                                    };
+                                    }
+                                };
 
                                 // list-append log
                                 let _ = match secondary_bin_store_client
@@ -506,6 +545,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                                             };
 
                                         let _ = match secondary_bin_store_client
+                                            .bin_client
                                             .list_append(&secondary_list_append_kv)
                                             .await
                                         {
@@ -520,7 +560,21 @@ impl storage::KeyString for Lab3BinStoreClient {
                                                         Ok(val) => val,
                                                         Err(_) => {
                                                             // iterate all if live backends list not able to give secondary
-                                                            match self.find_next_iter().await {
+
+                                                            let clone_bin_client_index =
+                                                                Arc::clone(&self.bin_client_index);
+                                                            let locked_bin_client_index =
+                                                                clone_bin_client_index.lock().await;
+                                                            let curr_bin_client_index =
+                                                                *locked_bin_client_index;
+                                                            std::mem::drop(locked_bin_client_index);
+
+                                                            match self
+                                                                .find_next_iter(
+                                                                    curr_bin_client_index + 1,
+                                                                )
+                                                                .await
+                                                            {
                                                                 Ok(val) => val,
                                                                 Err(_) => {
                                                                     // no live backend found, return None since already written to primary
@@ -547,6 +601,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                                                     };
 
                                                 let _ = match secondary_bin_store_client
+                                                    .bin_client
                                                     .list_append(&secondary_list_append_kv)
                                                     .await
                                                 {
@@ -566,7 +621,19 @@ impl storage::KeyString for Lab3BinStoreClient {
                                                 Ok(val) => val,
                                                 Err(_) => {
                                                     // iterate all if live backends list not able to give secondary
-                                                    match self.find_next_iter().await {
+
+                                                    let clone_bin_client_index =
+                                                        Arc::clone(&self.bin_client_index);
+                                                    let locked_bin_client_index =
+                                                        clone_bin_client_index.lock().await;
+                                                    let curr_bin_client_index =
+                                                        *locked_bin_client_index;
+                                                    std::mem::drop(locked_bin_client_index);
+
+                                                    match self
+                                                        .find_next_iter(curr_bin_client_index + 1)
+                                                        .await
+                                                    {
                                                         Ok(val) => val,
                                                         Err(_) => {
                                                             // no live backend found, return None since already written to primary
@@ -593,6 +660,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                                             };
 
                                         let _ = match secondary_bin_store_client
+                                            .bin_client
                                             .list_append(&secondary_list_append_kv)
                                             .await
                                         {
@@ -607,7 +675,13 @@ impl storage::KeyString for Lab3BinStoreClient {
                             Err(_) => {
                                 // what if this fails? 1st failure in this branch
                                 // iterate to get another primary and do the whole process. works because 1 failure already
-                                let _ = match self.find_next_iter().await {
+
+                                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                                let curr_bin_client_index = *locked_bin_client_index;
+                                std::mem::drop(locked_bin_client_index);
+
+                                let _ = match self.find_next_iter(curr_bin_client_index).await {
                                     Ok(val) => val,
                                     Err(_) => {
                                         // no live backend found, return error
@@ -621,8 +695,10 @@ impl storage::KeyString for Lab3BinStoreClient {
                                 // generate corresponding BinStoreClient
                                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                                 let locked_bin_store_client = clone_bin_store_client.lock().await;
+                                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                                std::mem::drop(locked_bin_store_client);
 
-                                match locked_bin_store_client.clock(0).await {
+                                match cached_bin_store_client.clock(0).await {
                                     Ok(seq_num) => {
                                         let new_update_log = UpdateLog {
                                             seq_num: seq_num, // DONE-TODO: no plus one here
@@ -647,8 +723,11 @@ impl storage::KeyString for Lab3BinStoreClient {
                                             Arc::clone(&self.bin_store_client);
                                         let locked_bin_store_client =
                                             clone_bin_store_client.lock().await;
+                                        let cached_bin_store_client =
+                                            (*locked_bin_store_client).clone();
+                                        std::mem::drop(locked_bin_store_client);
 
-                                        locked_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+                                        cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
 
                                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                                         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -656,12 +735,12 @@ impl storage::KeyString for Lab3BinStoreClient {
                                             value: self.name.clone(),
                                         };
 
-                                        let clone_bin_store_client =
-                                            Arc::clone(&self.bin_store_client);
-                                        let locked_bin_store_client =
-                                            clone_bin_store_client.lock().await;
+                                        let clone_bin_client = Arc::clone(&self.bin_client);
+                                        let locked_bin_client = clone_bin_client.lock().await;
+                                        let cached_bin_client = (*locked_bin_client).clone();
+                                        std::mem::drop(locked_bin_client);
 
-                                        let _ = match locked_bin_store_client
+                                        let _ = match cached_bin_client
                                             .list_append(&primary_list_append_kv)
                                             .await
                                         {
@@ -679,7 +758,19 @@ impl storage::KeyString for Lab3BinStoreClient {
                                                 Ok(val) => val,
                                                 Err(_) => {
                                                     // iterate all if live backends list not able to give secondary
-                                                    match self.find_next_iter().await {
+
+                                                    let clone_bin_client_index =
+                                                        Arc::clone(&self.bin_client_index);
+                                                    let locked_bin_client_index =
+                                                        clone_bin_client_index.lock().await;
+                                                    let curr_bin_client_index =
+                                                        *locked_bin_client_index;
+                                                    std::mem::drop(locked_bin_client_index);
+
+                                                    match self
+                                                        .find_next_iter(curr_bin_client_index + 1)
+                                                        .await
+                                                    {
                                                         Ok(val) => val,
                                                         Err(_) => {
                                                             // no live backend found, return None since already written to primary
@@ -706,6 +797,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                                             };
 
                                         let _ = match secondary_bin_store_client
+                                            .bin_client
                                             .list_append(&secondary_list_append_kv)
                                             .await
                                         {
@@ -727,7 +819,13 @@ impl storage::KeyString for Lab3BinStoreClient {
                     }
                     Err(_) => {
                         // regenerate clock and start again with one failure in this branch
-                        let _ = match self.find_next_iter().await {
+
+                        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                        let locked_bin_client_index = clone_bin_client_index.lock().await;
+                        let curr_bin_client_index = *locked_bin_client_index;
+                        std::mem::drop(locked_bin_client_index);
+
+                        let _ = match self.find_next_iter(curr_bin_client_index).await {
                             Ok(val) => val,
                             Err(_) => {
                                 // no live backend found, return error
@@ -741,8 +839,10 @@ impl storage::KeyString for Lab3BinStoreClient {
                         // generate corresponding BinStoreClient
                         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                         let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let cached_bin_store_client = (*locked_bin_store_client).clone();
+                        std::mem::drop(locked_bin_store_client);
 
-                        match locked_bin_store_client.clock(0).await {
+                        match cached_bin_store_client.clock(0).await {
                             Ok(seq_num) => {
                                 let new_update_log = UpdateLog {
                                     seq_num: seq_num, // DONE-TODO: no plus one here
@@ -765,8 +865,10 @@ impl storage::KeyString for Lab3BinStoreClient {
                                 // list-append log
                                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                                 let locked_bin_store_client = clone_bin_store_client.lock().await;
+                                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                                std::mem::drop(locked_bin_store_client);
 
-                                locked_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+                                cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
 
                                 // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                                 let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -774,10 +876,12 @@ impl storage::KeyString for Lab3BinStoreClient {
                                     value: self.name.clone(),
                                 };
 
-                                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-                                let locked_bin_store_client = clone_bin_store_client.lock().await;
+                                let clone_bin_client = Arc::clone(&self.bin_client);
+                                let locked_bin_client = clone_bin_client.lock().await;
+                                let cached_bin_client = (*locked_bin_client).clone();
+                                std::mem::drop(locked_bin_client);
 
-                                let _ = match locked_bin_store_client
+                                let _ = match cached_bin_client
                                     .list_append(&primary_list_append_kv)
                                     .await
                                 {
@@ -790,20 +894,29 @@ impl storage::KeyString for Lab3BinStoreClient {
 
                                 // also append log to secondary - the next in the live backends list
                                 // get live backends list
-                                let secondary_bin_store_client =
-                                    match self.find_next_from_live_list().await {
-                                        Ok(val) => val,
-                                        Err(_) => {
-                                            // iterate all if live backends list not able to give secondary
-                                            match self.find_next_iter().await {
-                                                Ok(val) => val,
-                                                Err(_) => {
-                                                    // no live backend found, return None since already written to primary
-                                                    return Ok(true);
-                                                }
+                                let secondary_bin_store_client = match self
+                                    .find_next_from_live_list()
+                                    .await
+                                {
+                                    Ok(val) => val,
+                                    Err(_) => {
+                                        // iterate all if live backends list not able to give secondary
+
+                                        let clone_bin_client_index =
+                                            Arc::clone(&self.bin_client_index);
+                                        let locked_bin_client_index =
+                                            clone_bin_client_index.lock().await;
+                                        let curr_bin_client_index = *locked_bin_client_index;
+                                        std::mem::drop(locked_bin_client_index);
+                                        match self.find_next_iter(curr_bin_client_index + 1).await {
+                                            Ok(val) => val,
+                                            Err(_) => {
+                                                // no live backend found, return None since already written to primary
+                                                return Ok(true);
                                             }
                                         }
-                                    };
+                                    }
+                                };
 
                                 // list-append log
                                 let _ = match secondary_bin_store_client
@@ -821,6 +934,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                                 };
 
                                 let _ = match secondary_bin_store_client
+                                    .bin_client
                                     .list_append(&secondary_list_append_kv)
                                     .await
                                 {
@@ -842,7 +956,13 @@ impl storage::KeyString for Lab3BinStoreClient {
             }
             Err(_) => {
                 // error: it just crashed. then find next alive node
-                let _ = match self.find_next_iter().await {
+
+                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                let curr_bin_client_index = *locked_bin_client_index;
+                std::mem::drop(locked_bin_client_index);
+
+                let _ = match self.find_next_iter(curr_bin_client_index).await {
                     Ok(val) => val,
                     Err(_) => {
                         // no live backend found, return error
@@ -856,8 +976,10 @@ impl storage::KeyString for Lab3BinStoreClient {
                 // generate corresponding BinStoreClient
                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                 let locked_bin_store_client = clone_bin_store_client.lock().await;
+                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                std::mem::drop(locked_bin_store_client);
 
-                match locked_bin_store_client.clock(0).await {
+                match cached_bin_store_client.clock(0).await {
                     Ok(seq_num) => {
                         let new_update_log = UpdateLog {
                             seq_num: seq_num, // DONE-TODO: no plus one here
@@ -879,8 +1001,10 @@ impl storage::KeyString for Lab3BinStoreClient {
                         // list-append log
                         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
                         let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let cached_bin_store_client = (*locked_bin_store_client).clone();
+                        std::mem::drop(locked_bin_store_client);
 
-                        locked_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+                        cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
 
                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -888,13 +1012,12 @@ impl storage::KeyString for Lab3BinStoreClient {
                             value: self.name.clone(),
                         };
 
-                        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-                        let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let clone_bin_client = Arc::clone(&self.bin_client);
+                        let locked_bin_client = clone_bin_client.lock().await;
+                        let cached_bin_client = (*locked_bin_client).clone();
+                        std::mem::drop(locked_bin_client);
 
-                        let _ = match locked_bin_store_client
-                            .list_append(&primary_list_append_kv)
-                            .await
-                        {
+                        let _ = match cached_bin_client.list_append(&primary_list_append_kv).await {
                             Ok(_) => {}
                             Err(_) => {}
                         }; // what if this fails? Won't fail bcz 1 failure in this branch
@@ -909,7 +1032,12 @@ impl storage::KeyString for Lab3BinStoreClient {
                             Ok(val) => val,
                             Err(_) => {
                                 // iterate all if live backends list not able to give secondary
-                                match self.find_next_iter().await {
+
+                                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                                let curr_bin_client_index = *locked_bin_client_index;
+                                std::mem::drop(locked_bin_client_index);
+                                match self.find_next_iter(curr_bin_client_index + 1).await {
                                     Ok(val) => val,
                                     Err(_) => {
                                         // no live backend found, return None since already written to primary
@@ -932,6 +1060,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                         };
 
                         let _ = match secondary_bin_store_client
+                            .bin_client
                             .list_append(&secondary_list_append_kv)
                             .await
                         {
@@ -1029,7 +1158,12 @@ impl storage::KeyString for Lab3BinStoreClient {
     }
 
     async fn keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -1049,7 +1183,12 @@ impl storage::KeyString for Lab3BinStoreClient {
 #[async_trait]
 impl storage::KeyList for Lab3BinStoreClient {
     async fn list_get(&self, key: &str) -> TribResult<storage::List> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -1066,7 +1205,12 @@ impl storage::KeyList for Lab3BinStoreClient {
     }
 
     async fn list_append(&self, kv: &storage::KeyValue) -> TribResult<bool> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -1083,7 +1227,12 @@ impl storage::KeyList for Lab3BinStoreClient {
     }
 
     async fn list_remove(&self, kv: &storage::KeyValue) -> TribResult<u32> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -1100,7 +1249,12 @@ impl storage::KeyList for Lab3BinStoreClient {
     }
 
     async fn list_keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
@@ -1120,7 +1274,12 @@ impl storage::KeyList for Lab3BinStoreClient {
 #[async_trait]
 impl storage::Storage for Lab3BinStoreClient {
     async fn clock(&self, at_least: u64) -> TribResult<u64> {
-        let _ = match self.find_next_iter().await {
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
             Ok(val) => val,
             Err(_) => {
                 // no live backend found, return error
