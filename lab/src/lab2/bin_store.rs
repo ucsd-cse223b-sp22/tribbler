@@ -26,6 +26,9 @@ impl storage::BinStorage for BinStore {
         let hashed_backend_index = hash % n; // generate hash and get the index of backend
 
         let primary_backend_index = hashed_backend_index;
+
+        log::info!("primary backend index {}", primary_backend_index);
+
         /* let mut is_primary_found = false;
 
         // iterate and find the next alive starting from hashed_backend_index
