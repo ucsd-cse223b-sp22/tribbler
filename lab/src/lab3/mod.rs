@@ -167,3 +167,9 @@
 //! if they feel the need.
 //!
 //! Happy Lab 3. :-)
+pub mod bin_store_client;
+pub mod frontend;
+pub mod keeper_impl;
+mod lab;
+pub mod lab3_bin_store_client;
+pub mod storage_client;
