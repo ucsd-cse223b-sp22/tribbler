@@ -3,6 +3,7 @@
 use crate::lab2::storage_client::StorageClient;
 use async_trait::async_trait;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -1158,6 +1159,28 @@ impl storage::KeyString for Lab3BinStoreClient {
     }
 
     async fn keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
+        // let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        // let locked_bin_client_index = clone_bin_client_index.lock().await;
+        // let curr_bin_client_index = *locked_bin_client_index;
+        // std::mem::drop(locked_bin_client_index);
+
+        // let _ = match self.find_next_iter(curr_bin_client_index).await {
+        //     Ok(val) => val,
+        //     Err(_) => {
+        //         // no live backend found, return error
+        //         return Err(Box::new(TribblerError::Unknown(
+        //             "No live backend found".to_string(),
+        //         )));
+        //     }
+        // };
+
+        // let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        // let locked_bin_store_client = clone_bin_store_client.lock().await;
+        // let result = locked_bin_store_client.list_keys(&p).await?;
+        // Ok(result)
+
+        // fetch log by forwarding request to bin_store_client. It will handle prepending name and handling bin part
+
         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
         let locked_bin_client_index = clone_bin_client_index.lock().await;
         let curr_bin_client_index = *locked_bin_client_index;
@@ -1171,12 +1194,158 @@ impl storage::KeyString for Lab3BinStoreClient {
                     "No live backend found".to_string(),
                 )));
             }
-        };
+        }; // this will work with the current bin_client_index being the hashed value
+           // this will update the next alive in the cached bin store client and cached storage client.
 
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
-        let result = locked_bin_store_client.list_keys(&p).await?;
-        Ok(result)
+        let cached_bin_store_client = (*locked_bin_store_client).clone();
+        std::mem::drop(locked_bin_store_client);
+
+        let storage::List(fetched_log) =
+            match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                Ok(v) => v, // 1st shot, got log
+                Err(_) => {
+                    // A live backend just crashed; 2nd attempt by iterating through the list to find the next alive
+
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let locked_bin_client_index = clone_bin_client_index.lock().await;
+                    let curr_bin_client_index = *locked_bin_client_index;
+                    std::mem::drop(locked_bin_client_index);
+
+                    let _ = match self.find_next_iter(curr_bin_client_index).await {
+                        Ok(val) => val,
+                        Err(_) => {
+                            // no live backend found, return error
+                            return Err(Box::new(TribblerError::Unknown(
+                                "No live backend found".to_string(),
+                            )));
+                        }
+                    };
+
+                    let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                    let locked_bin_store_client = clone_bin_store_client.lock().await;
+                    let cached_bin_store_client = (*locked_bin_store_client).clone();
+                    std::mem::drop(locked_bin_store_client);
+
+                    match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                        Ok(v) => v, // got the log
+                        Err(_) => {
+                            // this should return error
+                            return Err(Box::new(TribblerError::Unknown(
+                                "Unable to get log".to_string(),
+                            )));
+                        }
+                    }
+                }
+            };
+
+        // regenerate data from log and serve query
+        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+            .iter()
+            .map(|x| serde_json::from_str(&x).unwrap())
+            .collect::<Vec<UpdateLog>>();
+
+        // sort the deserialized log as per timestamp
+        // keep the fields in the required order so that they are sorted in that same order.
+        deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+        // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+        // Based on the output of the set operations, generate result for the requested get op and return
+        // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+        // just need to keep track of seq_num to avoid considering duplicate ops in log
+        let mut max_seen_seq_num = 0u64;
+
+        let mut return_value_set: HashSet<String> = HashSet::new();
+
+        for each_log in deserialized_log {
+            if matches!(each_log.update_operation, UpdateOperation::Set) {
+                if each_log.kv_params.key.starts_with(&p.prefix)
+                    && each_log.kv_params.key.ends_with(&p.suffix)
+                {
+                    if each_log.seq_num > max_seen_seq_num {
+                        return_value_set.insert(each_log.kv_params.key.clone());
+                        max_seen_seq_num = each_log.seq_num;
+                    }
+                }
+            }
+        }
+
+        let mut return_value_list: Vec<String> = Vec::from_iter(return_value_set);
+
+        // Logs not found in this primary - a new primary where the migration might not be complete. iterate its live backends list and contact the next live
+        if return_value_list.is_empty() {
+            // get live backends list
+            let secondary_bin_store_client = match self.find_next_from_live_list().await {
+                Ok(val) => val,
+                Err(_) => {
+                    // iterate all if live backends list not able to give secondary
+
+                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                    let locked_bin_client_index = clone_bin_client_index.lock().await;
+                    let curr_bin_client_index = *locked_bin_client_index;
+                    std::mem::drop(locked_bin_client_index);
+
+                    match self.find_next_iter(curr_bin_client_index + 1).await {
+                        Ok(val) => val,
+                        Err(_) => {
+                            // no live backend found, return None since a backend exists but doesn't have data
+                            return Ok(storage::List(Vec::new()));
+                        }
+                    }
+                }
+            };
+
+            // secondary bin store client now contains pointer to secondary node
+
+            // get log
+            let storage::List(fetched_log) =
+                match secondary_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                    Ok(val) => val,
+                    Err(_) => {
+                        // no log data available
+                        return Ok(storage::List(Vec::new()));
+                    }
+                }; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+            // regenerate data from log and serve query
+            let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                .iter()
+                .map(|x| serde_json::from_str(&x).unwrap())
+                .collect::<Vec<UpdateLog>>();
+
+            // sort the deserialized log as per timestamp
+            // keep the fields in the required order so that they are sorted in that same order.
+            deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+            // iterate through the desirialized log and look only for set operations for this user. Single log is the best/easiest
+            // Based on the output of the set operations, generate result for the requested get op and return
+            // think about where can we clean the log - clean in memory only, Don't clean in storage - hashset approach
+
+            // just need to keep track of seq_num to avoid considering duplicate ops in log
+            let mut max_seen_seq_num = 0u64;
+
+            let mut return_value_set: HashSet<String> = HashSet::new();
+
+            for each_log in deserialized_log {
+                if matches!(each_log.update_operation, UpdateOperation::Set) {
+                    if each_log.kv_params.key.starts_with(&p.prefix)
+                        && each_log.kv_params.key.ends_with(&p.suffix)
+                    {
+                        if each_log.seq_num > max_seen_seq_num {
+                            return_value_set.insert(each_log.kv_params.key.clone());
+                            max_seen_seq_num = each_log.seq_num;
+                        }
+                    }
+                }
+            }
+
+            return_value_list = Vec::from_iter(return_value_set);
+        }
+
+        return_value_list.sort(); //sorts in place
+        Ok(storage::List(return_value_list))
     }
 }
 
