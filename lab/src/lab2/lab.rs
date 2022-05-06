@@ -1,22 +1,16 @@
-// TODO
-// 1. allocation updation in run_keeper_heartbeat - done i think
-// 2. take care of wrap around cases
-// 3. Update _kp list after migration - done i think
-// 4. send live list to backends
-// 5. Arc<Keeper>?
-
 use crate::{
     keeper::{keeper_sync_client::KeeperSyncClient, keeper_sync_server::KeeperSyncServer},
     lab2::bin_store::BinStore,
 };
 use std::{
-    clone,
     cmp::min,
     collections::{hash_map::DefaultHasher, HashSet},
     hash::Hasher,
-    mem,
-    sync::{Arc, Mutex, RwLock},
+    net::ToSocketAddrs,
+    sync::Arc,
 };
+use tokio::sync::Mutex;
+
 use tokio::time::{self, interval};
 use tribbler::{
     colon,
@@ -40,8 +34,8 @@ use super::{
 // use super::{frontend::FrontEnd, storage_client::StorageClient};
 
 pub struct Allocation {
-    pub start: i32,
-    pub end: i32,
+    pub start: usize,
+    pub end: usize,
     pub is_alive: bool,
 }
 
@@ -65,49 +59,64 @@ pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage
 /// started.
 #[allow(unused_variables)]
 pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
-    let keeper = Arc::new(Keeper {
-        max_clock_so_far: Arc::new(RwLock::new(0u64)),
-        live_backends_list_bc: Arc::new(RwLock::new(LiveBackends {
-            backs: vec![],
-            is_alive_list: vec![],
-        })),
-        live_backends_list_kp: Arc::new(RwLock::new(LiveBackends {
-            backs: vec![],
-            is_alive_list: vec![],
-        })),
-        first_bc_index: Arc::new(RwLock::new(0)),
-        last_bc_index: Arc::new(RwLock::new(0)),
+    // initialize values and then pass copy of these values to all the keeper structs that you create.
+    // so that all instantiations point to same data
+    let MAX_CLOCK_SO_FAR: Arc<Mutex<u64>> = Arc::new(Mutex::new(0u64));
+    let LIVE_BACKENDS_LIST_KP: Arc<Mutex<LiveBackends>> = Arc::new(Mutex::new(LiveBackends {
         backs: kc.backs.clone(),
-        addrs: kc.addrs.clone(),
-        index: kc.this as u32,
-        cached_conn: vec![None; kc.addrs.len()],
+        is_alive_list: vec![true; kc.backs.len()],
+        is_migration_list: vec![false; kc.backs.len()],
+    }));
+    let LIVE_BACKENDS_LIST_BC: Arc<Mutex<LiveBackends>> = Arc::new(Mutex::new(LiveBackends {
+        backs: kc.backs.clone(),
+        is_alive_list: vec![true; kc.backs.len()],
+        is_migration_list: vec![false; kc.backs.len()],
+    }));
+    let FIRST_BC_ID: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let LAST_BC_ID: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let BACK_ADDRS = kc.backs.clone();
+    let KEEPER_ADDRS = kc.addrs.clone();
+    let MY_ID = kc.this as u32;
+    let CACHED_CONN = Arc::new(Mutex::new(vec![None; kc.addrs.len()]));
+
+    let keeper = Arc::new(Keeper {
+        max_clock_so_far: MAX_CLOCK_SO_FAR.clone(),
+        live_backends_list_bc: LIVE_BACKENDS_LIST_BC.clone(),
+        live_backends_list_kp: LIVE_BACKENDS_LIST_KP.clone(),
+        first_bc_index: FIRST_BC_ID.clone(),
+        last_bc_index: LAST_BC_ID.clone(),
+        back_addrs: BACK_ADDRS.clone(),
+        keeper_addrs: KEEPER_ADDRS.clone(),
+        my_id: MY_ID,
+        cached_conn: CACHED_CONN.clone(),
     });
+    // STARTED RPC SERVER
     tokio::spawn(build_and_serve_keeper_server(keeper.clone()));
 
-    // keeper.clone().sync_clocks_and_compute_live_bc();
-
-    // initial backend allocation to keeper code start: NEED TO CHECK THIS
+    // INITIAL BACKEND ALLOCATION TO KEEPER
     let bc_len = kc.backs.len();
     let kp_len = kc.addrs.len();
-
-    let n = bc_len / kp_len;
-
+    let n: u32 = (bc_len / kp_len) as u32;
     let mut allocations: Vec<Allocation> = vec![];
     let mut curr_start = 0;
     for i in 0..kp_len {
-        allocations.push(Allocation {
-            start: curr_start as i32, // here no need to check wraparound because we will stop at last index
-            end: min((curr_start + n - 1) as i32, (bc_len - 1) as i32),
-            is_alive: true,
-        });
+        if i == kc.this {
+            let clone_arc = keeper.first_bc_index.clone();
+            let mut locked_val = clone_arc.lock().await;
+            *locked_val = curr_start;
+            drop(locked_val);
+
+            let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+            let mut locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+            *locked_val = min((curr_start + n - 1), (bc_len - 1) as u32);
+            drop(locked_val)
+        }
         curr_start += n;
-        // }ß
     }
-    // initial backend allocation to keeper code end
-    // 1 round keeper-backend
-    let cloned_keeper = Arc::clone(&keeper);
-    sync_clocks_and_compute_live_bc(cloned_keeper, true).await;
-    // TODO 1 round keeper-keeper
+    // 1 ROUND OF KEEPER TO BACKEND COMMUNICATION
+    sync_clocks_and_compute_live_bc(keeper.clone(), true).await;
+    // 1 ROUND OF KEEPER TO KEEPER COMMUNICATION
+    run_keeper_heartbeat(keeper.clone(), true).await;
     // send ready signal
     if let Some(tx) = kc.ready.clone() {
         let _ = match tx.send(true) {
@@ -116,8 +125,8 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
         };
     }
 
-    tokio::spawn(sync_clocks_and_compute_live_bc(keeper, false));
-    tokio::spawn(run_keeper_heartbeat(keeper.clone(), allocations));
+    tokio::spawn(sync_clocks_and_compute_live_bc(keeper.clone(), false));
+    tokio::spawn(run_keeper_heartbeat(keeper.clone(), false));
 
     if let Some(mut rx) = kc.shutdown {
         rx.recv().await;
@@ -130,277 +139,570 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
 }
 
 pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool) -> TribResult<()> {
-    let max_clock_so_far = Arc::clone(&keeper.max_clock_so_far);
-    *max_clock_so_far.write().unwrap() = 0;
-    let mut storage_clients = Vec::new();
-
-    for address in keeper.backs[*keeper.first_bc_index.read().unwrap() as usize
-        ..(*keeper.last_bc_index.read().unwrap() + 1) as usize]
-        .iter()
-    // TODO handle wraparound
-    {
-        storage_clients.push(StorageClient {
-            addr: format!("http://{}", address.clone()),
-            cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-        });
-    }
-
     // 1 second ticker
     let mut interval = time::interval(time::Duration::from_millis(1000));
 
     loop {
         interval.tick().await;
-        let my_keeper = Arc::clone(&keeper);
-        helper(my_keeper, &storage_clients, initial).await?;
-    }
-}
+        // let my_keeper = Arc::clone(&keeper);
+        // helper(my_keeper, &storage_clients, initial).await?;
+        let clone_arc = keeper.max_clock_so_far.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut max_clock_so_far = *locked_val;
+        let mut read_max_clock_so_far = 0u64;
+        drop(locked_val);
 
-async fn helper(
-    keeper: Arc<Keeper>,
-    storage_clients: &Vec<StorageClient>,
-    initial: bool,
-) -> TribResult<()> {
-    let max_clock_so_far = Arc::clone(&keeper.max_clock_so_far);
-    let c = *max_clock_so_far.read().unwrap();
+        let clone_arc = keeper.live_backends_list_kp.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut live_backends_list_kp = (*locked_val).clone();
+        drop(locked_val);
 
-    let my_live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
-    let my_live_backends_list_kp = Arc::clone(&keeper.live_backends_list_kp);
+        let clone_arc = keeper.live_backends_list_bc.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut live_backends_list_bc = (*locked_val).clone();
+        drop(locked_val);
 
-    let mut live_backends_list_bc = (*my_live_backends_list_bc.write().unwrap()).clone();
+        let my_id = (*keeper).my_id;
+        let bc_len = (*keeper).back_addrs.len();
+        let back_addrs = (*keeper).back_addrs.clone();
 
-    let start = *keeper.first_bc_index.read().unwrap() as usize;
-    let end = *keeper.last_bc_index.read().unwrap() as usize;
+        let clone_arc = keeper.first_bc_index.clone();
+        let locked_val = clone_arc.lock().await;
+        let first_back_index = *locked_val;
+        drop(locked_val);
 
-    for (idx, storage_client) in storage_clients.iter().enumerate() {
-        live_backends_list_bc.backs[start + idx] = storage_client.addr.clone(); // TODO take care of wrap around
+        let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+        let locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+        let last_back_index = *locked_val;
+        drop(locked_val);
 
-        let storage_client_clock = storage_client.clock(c + 1u64).await;
-        match storage_client_clock {
-            Ok(clock_val) => {
-                live_backends_list_bc.is_alive_list[start + idx] = true;
-                *max_clock_so_far.write().unwrap() =
-                    if *max_clock_so_far.read().unwrap() < clock_val {
-                        clock_val
-                    } else {
-                        *max_clock_so_far.read().unwrap()
+        let mut storage_clients = Vec::new();
+        for address in back_addrs {
+            storage_clients.push(StorageClient {
+                addr: format!("http://{}", address.clone()),
+                cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+            });
+        }
+
+        if last_back_index < first_back_index {
+            for index in first_back_index..bc_len as u32 {
+                let clk = match storage_clients[index as usize]
+                    .clock(max_clock_so_far)
+                    .await
+                {
+                    Ok(v) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = true;
+                        v
+                    }
+                    Err(e) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = false;
+                        continue;
+                    }
+                };
+                if clk > read_max_clock_so_far {
+                    read_max_clock_so_far = clk;
+                }
+            }
+            for index in 0..last_back_index + 1 as u32 {
+                let clk = match storage_clients[index as usize]
+                    .clock(max_clock_so_far)
+                    .await
+                {
+                    Ok(v) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = true;
+                        v
+                    }
+                    Err(e) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = false;
+                        continue;
+                    }
+                };
+                if clk > read_max_clock_so_far {
+                    read_max_clock_so_far = clk;
+                }
+            }
+            if read_max_clock_so_far > max_clock_so_far {
+                max_clock_so_far = read_max_clock_so_far + 1;
+            }
+            for index in first_back_index..bc_len as u32 {
+                // send live list and updated clock
+                if live_backends_list_bc.is_alive_list[index as usize] {
+                    // if alive send the live list and the clock
+                    let _ = match storage_clients[index as usize]
+                        .set(&KeyValue {
+                            key: KEY_LIVE_BACKENDS_LIST.to_string(),
+                            value: serde_json::to_string(&live_backends_list_bc)?,
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
                     };
-
-                // send that backend a live_backends_list_bc
-                storage_client.set(&KeyValue {
-                    key: KEY_LIVE_BACKENDS_LIST.to_string(),
-                    value: serde_json::to_string(&live_backends_list_bc)?,
-                });
+                    let _ = match storage_clients[index as usize]
+                        .clock(max_clock_so_far)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                }
+                if initial {
+                    live_backends_list_kp.is_alive_list[index as usize] =
+                        live_backends_list_bc.is_alive_list[index as usize];
+                } else {
+                    if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
+                        && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                    if live_backends_list_kp.is_alive_list[index as usize] // node has died
+                        && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                }
             }
-            Err(_) => {
-                // trigger migration procedure only if there is a mismatch with _kp list
-                // compute live_bc_list
-                live_backends_list_bc.is_alive_list[start + idx] = false;
+            for index in 0..last_back_index + 1 as u32 {
+                // send live list and updated clock
+                if live_backends_list_bc.is_alive_list[index as usize] {
+                    // if alive send the live list and the clock
+                    let _ = match storage_clients[index as usize]
+                        .set(&KeyValue {
+                            key: KEY_LIVE_BACKENDS_LIST.to_string(),
+                            value: serde_json::to_string(&live_backends_list_bc)?,
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                    let _ = match storage_clients[index as usize]
+                        .clock(max_clock_so_far)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                }
+                if initial {
+                    live_backends_list_kp.is_alive_list[index as usize] =
+                        live_backends_list_bc.is_alive_list[index as usize];
+                } else {
+                    if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
+                        && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                    if live_backends_list_kp.is_alive_list[index as usize] // node has died
+                        && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                }
+            }
+        } else {
+            for index in first_back_index..last_back_index + 1 {
+                let clk = match storage_clients[index as usize]
+                    .clock(max_clock_so_far)
+                    .await
+                {
+                    Ok(v) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = true;
+                        v
+                    }
+                    Err(e) => {
+                        live_backends_list_bc.is_alive_list[index as usize] = false;
+                        continue;
+                    }
+                };
+                if clk > read_max_clock_so_far {
+                    read_max_clock_so_far = clk;
+                }
+            }
+            if read_max_clock_so_far > max_clock_so_far {
+                max_clock_so_far = read_max_clock_so_far + 1;
+            }
+            for index in first_back_index..last_back_index + 1 {
+                // send new clock and live list
+                // send live list and updated clock
+                //update _kp
+                if live_backends_list_bc.is_alive_list[index as usize] {
+                    // if alive send the live list and the clock
+                    let _ = match storage_clients[index as usize]
+                        .set(&KeyValue {
+                            key: KEY_LIVE_BACKENDS_LIST.to_string(),
+                            value: serde_json::to_string(&live_backends_list_bc)?,
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                    let _ = match storage_clients[index as usize]
+                        .clock(max_clock_so_far)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {}
+                    };
+                }
+                if initial {
+                    live_backends_list_kp.is_alive_list[index as usize] =
+                        live_backends_list_bc.is_alive_list[index as usize];
+                } else {
+                    if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
+                        && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                    if live_backends_list_kp.is_alive_list[index as usize] // node has died
+                        && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
+                    {
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
+                        live_backends_list_bc.is_migration_list[index as usize] = true;
+                        live_backends_list_kp.is_migration_list[index as usize] = true;
+                    }
+                }
             }
         }
-    }
+        let clone_arc = keeper.max_clock_so_far.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = max_clock_so_far;
+        drop(locked_val);
 
-    let live_backends_list_bc_read = (*my_live_backends_list_bc.read().unwrap()).clone();
-    let live_backends_list_kp_read = (*my_live_backends_list_kp.read().unwrap()).clone();
+        let clone_arc = keeper.live_backends_list_kp.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = live_backends_list_kp.clone();
+        drop(locked_val);
 
-    if !initial {
-        // TODO wraparound and _1 because end index is aLSO included
-        for (idx, bc_elem) in &mut live_backends_list_bc_read.is_alive_list[start..end]
-            .iter()
-            .enumerate()
-        {
-            let kp_elem = live_backends_list_kp_read.is_alive_list[start..end][idx]; // take care of wrap around
-            if !(*bc_elem) && kp_elem {
-                // backend went down
-                tokio::spawn(migrate_data(keeper, start + idx));
-            } else if *bc_elem && !kp_elem {
-                // backend came up
-                tokio::spawn(migrate_data_when_up(keeper, start + idx));
-            }
+        let clone_arc = keeper.live_backends_list_bc.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = live_backends_list_bc.clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.first_bc_index.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = first_back_index;
+        drop(locked_val);
+
+        let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+        let mut locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+        *locked_val = last_back_index;
+        drop(locked_val);
+        if initial {
+            break;
         }
     }
-
-    *max_clock_so_far.write().unwrap() += 1u64;
-    let c = *max_clock_so_far.read().unwrap();
-    for storage_client in storage_clients.iter() {
-        let clock_res = storage_client.clock(c + 1u64).await;
-        match clock_res {
-            Ok(_) => {}
-            Err(_) => {
-                continue;
-            }
-        };
-    }
-
     Ok(())
 }
 
-pub async fn build_and_serve_keeper_server(keeper: Keeper) -> TribResult<()> {
+pub async fn build_and_serve_keeper_server(keeper: Arc<Keeper>) -> TribResult<()> {
+    let mut addr_iter = match (*keeper).keeper_addrs[(*keeper).my_id as usize].to_socket_addrs() {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(Box::new(e));
+        }
+    };
+    let addr_str = match addr_iter.next() {
+        Some(v) => v,
+        None => {
+            return Err("Empty Addr".into());
+        }
+    };
+    let k = Keeper {
+        max_clock_so_far: (*keeper).max_clock_so_far.clone(),
+        live_backends_list_bc: (*keeper).live_backends_list_bc.clone(),
+        live_backends_list_kp: (*keeper).live_backends_list_kp.clone(),
+        first_bc_index: (*keeper).first_bc_index.clone(),
+        last_bc_index: (*keeper).last_bc_index.clone(),
+        back_addrs: (*keeper).back_addrs.clone(),
+        keeper_addrs: (*keeper).keeper_addrs.clone(),
+        my_id: (*keeper).my_id,
+        cached_conn: (*keeper).cached_conn.clone(),
+    };
     tonic::transport::Server::builder()
-        .add_service(KeeperSyncServer::new(keeper.clone()))
-        .serve(
-            keeper.addrs[keeper.index as usize]
-                .parse() // TODO: change this to use to_socket_addrs
-                .expect("Unable to parse socket address"),
-        )
+        .add_service(KeeperSyncServer::new(k))
+        .serve(addr_str)
         .await?;
     Ok(())
 }
 
-pub async fn run_keeper_heartbeat(
-    mut keeper: Keeper,
-    mut allocations: Vec<Allocation>,
-) -> TribResult<()> {
+pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribResult<()> {
+    // INITIAL BACKEND ALLOCATION TO KEEPER
+    let bc_len = (*keeper).back_addrs.len();
+    let kp_len = (*keeper).keeper_addrs.len();
+    let n = bc_len / kp_len;
+    let mut allocations: Vec<Allocation> = vec![];
+    let mut curr_start = 0;
+    for i in 0..kp_len {
+        allocations.push(Allocation {
+            start: curr_start, // here no need to check wraparound because we will stop at last index
+            end: min((curr_start + n - 1), (bc_len - 1)),
+            is_alive: true,
+        });
+        curr_start += n;
+    }
+
     let mut heartbeat_interval = interval(time::Duration::from_millis(1000)); // 1 second ticker
-    let max_clock_so_far = Arc::clone(&keeper.max_clock_so_far);
+
     loop {
         heartbeat_interval.tick().await;
-        for (keeper_idx, addr) in keeper.addrs.iter().enumerate() {
-            if keeper_idx as u32 == keeper.index {
+
+        let clone_arc = keeper.max_clock_so_far.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut max_clock_so_far = *locked_val;
+        let mut read_max_clock_so_far = 0u64;
+        drop(locked_val);
+
+        let clone_arc = keeper.cached_conn.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut cached_conn = (*locked_val).clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.live_backends_list_kp.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut live_backends_list_kp = (*locked_val).clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.live_backends_list_bc.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut live_backends_list_bc = (*locked_val).clone();
+        drop(locked_val);
+
+        let keeper_addrs = (*keeper).keeper_addrs.clone();
+        let my_id = (*keeper).my_id;
+        let bc_len = (*keeper).back_addrs.len();
+        let back_addrs = (*keeper).back_addrs.clone();
+
+        let clone_arc = keeper.first_bc_index.clone();
+        let locked_val = clone_arc.lock().await;
+        let mut my_first_back_index = (*locked_val).clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+        let locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+        let mut my_last_back_index = (*locked_val).clone();
+        drop(locked_val);
+
+        for (keeper_idx, addr) in keeper_addrs.iter().enumerate() {
+            if keeper_idx as u32 == my_id {
                 continue;
             }
-            if keeper.cached_conn[keeper_idx].is_none() {
-                // if let Ok(keeper_client)
-                keeper.cached_conn[keeper_idx] = match KeeperSyncClient::connect(addr.clone()).await
-                {
-                    Ok(keeper_client) => Some(keeper_client),
-                    Err(_) => {
-                        allocations[keeper_idx].is_alive = false;
-                        None
-                    }
-                };
-                // keeper.cached_conn[keeper_idx] = Some(keeper_client);
+            if cached_conn[keeper_idx].is_none() {
+                cached_conn[keeper_idx] =
+                    match KeeperSyncClient::connect(format!("http://{}", addr.clone())).await {
+                        Ok(keeper_client) => {
+                            allocations[keeper_idx].is_alive = true;
+                            Some(keeper_client)
+                        }
+                        Err(_) => {
+                            allocations[keeper_idx].is_alive = false;
+                            None
+                        }
+                    };
             }
 
-            // let heartbeat_res = keeper.cached_conn[keeper_idx]
-            //     .clone()
-            //     .unwrap()
-            //     .get_heartbeat(tonic::Request::new(()))
-            //     .await;
-            if !keeper.cached_conn[keeper_idx].is_none() {}
-            if let Ok(mut heartbeat) = keeper.cached_conn[keeper_idx]
-                .clone()
-                .unwrap()
-                .get_heartbeat(tonic::Request::new(()))
-                .await
-            {
-                allocations[keeper_idx].is_alive = true;
+            if !cached_conn[keeper_idx].is_none() {
+                if let Ok(mut heartbeat) = cached_conn[keeper_idx]
+                    .as_mut()
+                    .unwrap()
+                    .get_heartbeat(tonic::Request::new(()))
+                    .await
+                {
+                    allocations[keeper_idx].is_alive = true;
+                    if read_max_clock_so_far < heartbeat.get_mut().max_clock {
+                        read_max_clock_so_far = heartbeat.get_mut().max_clock;
+                    }
 
-                *max_clock_so_far.write().unwrap() =
-                    if *max_clock_so_far.read().unwrap() < heartbeat.get_mut().max_clock {
-                        heartbeat.get_mut().max_clock
+                    let remote_live_back_list: LiveBackends =
+                        serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
+
+                    let remote_first_back_index = heartbeat.get_mut().first_back_index;
+                    let remote_last_back_index = heartbeat.get_mut().last_back_index;
+                    if remote_last_back_index < remote_first_back_index {
+                        for index in remote_first_back_index..bc_len as u32 {
+                            live_backends_list_bc.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_bc.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_bc.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
+
+                            live_backends_list_kp.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_kp.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_kp.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
+                        }
+                        for index in 0..remote_last_back_index + 1 as u32 {
+                            live_backends_list_bc.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_bc.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_bc.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
+
+                            live_backends_list_kp.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_kp.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_kp.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
+                        }
                     } else {
-                        *max_clock_so_far.read().unwrap()
-                    };
+                        for index in remote_first_back_index..remote_last_back_index + 1 as u32 {
+                            live_backends_list_bc.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_bc.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_bc.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
 
-                let live_back_list: LiveBackends =
-                    serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
-                let first_back_index = heartbeat.get_mut().first_back_index;
-                let last_back_index = heartbeat.get_mut().last_back_index;
-                // TODO wraparound
-                for i in first_back_index..last_back_index + 1 {
-                    let live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
-                    live_backends_list_bc.write().unwrap().backs[i as usize] =
-                        live_back_list.backs[i as usize].clone();
-                    live_backends_list_bc.write().unwrap().is_alive_list[i as usize] =
-                        live_back_list.is_alive_list[i as usize];
+                            live_backends_list_kp.is_alive_list[index as usize] =
+                                remote_live_back_list.is_alive_list[index as usize];
+                            live_backends_list_kp.is_migration_list[index as usize] =
+                                remote_live_back_list.is_migration_list[index as usize];
+                            live_backends_list_kp.backs[index as usize] =
+                                remote_live_back_list.backs[index as usize].clone();
+                        }
+                    }
+                } else {
+                    allocations[keeper_idx].is_alive = false;
                 }
             } else {
                 allocations[keeper_idx].is_alive = false;
             }
-
-            // TODO: Update keeper to backend allocations
-            let kp_len = keeper.addrs.len();
-            let my_end_index = Arc::clone(&keeper.last_bc_index);
-            let mut end_index = my_end_index.write().unwrap();
-            for j in 1..kp_len {
-                if !allocations[(keeper.index as usize + j) % kp_len].is_alive {
-                    *end_index = allocations[(keeper.index as usize + j) % kp_len].end as u32;
-                } else {
-                    *end_index =
-                        (allocations[(keeper.index as usize + j) % kp_len].start - 1) as u32;
-                    break;
-                }
-            }
-
-            // let mut heartbeat = match heartbeat_res {
-            //     Ok(heartbeat) => {
-            //         allocations[keeper_idx].is_alive = true;
-            //         heartbeat
-            //     }
-            //     Err(_) => {
-            //         // trigger keeper reallocation process; this will be handled by the
-            //         todo!()
-            //     }
-            // };
-
-            // *max_clock_so_far.write().unwrap() =
-            //     if *max_clock_so_far.read().unwrap() < heartbeat.get_mut().max_clock {
-            //         heartbeat.get_mut().max_clock
-            //     } else {
-            //         *max_clock_so_far.read().unwrap()
-            //     };
-
-            // let live_back_list: LiveBackends =
-            //     serde_json::from_str(&heartbeat.get_mut().live_back_list)?;
-            // let first_back_index = heartbeat.get_mut().first_back_index;
-            // let last_back_index = heartbeat.get_mut().last_back_index;
-
-            // for i in first_back_index..last_back_index + 1 {
-            //     let live_backends_list_bc = Arc::clone(&keeper.live_backends_list_bc);
-            //     live_backends_list_bc.write().unwrap().backs[i as usize] =
-            //         live_back_list.backs[i as usize].clone();
-            //     live_backends_list_bc.write().unwrap().is_alive_list[i as usize] =
-            //         live_back_list.is_alive_list[i as usize];
-            // }
         }
-        *max_clock_so_far.write().unwrap() += 1;
+        if read_max_clock_so_far > max_clock_so_far {
+            max_clock_so_far = read_max_clock_so_far + 1;
+        }
+        // TODO: Update keeper to backend allocations
+        let kp_len = keeper_addrs.len();
+        for j in 1..kp_len - 1 {
+            if !allocations[(my_id as usize + j) % kp_len].is_alive {
+                my_last_back_index = allocations[(my_id as usize + j) % kp_len].end as u32;
+            } else {
+                my_last_back_index = ((allocations[(my_id as usize + j) % kp_len].start + bc_len
+                    - 1)
+                    % bc_len) as u32;
+                break;
+            }
+        }
+        let clone_arc = keeper.max_clock_so_far.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = max_clock_so_far;
+        drop(locked_val);
+
+        let clone_arc = keeper.live_backends_list_kp.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = live_backends_list_kp.clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.live_backends_list_bc.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = live_backends_list_bc.clone();
+        drop(locked_val);
+
+        let clone_arc = keeper.first_bc_index.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = my_first_back_index;
+        drop(locked_val);
+
+        let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+        let mut locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+        *locked_val = my_last_back_index;
+        drop(locked_val);
+
+        let clone_arc = keeper.cached_conn.clone();
+        let mut locked_val = clone_arc.lock().await;
+        *locked_val = cached_conn;
+        drop(locked_val);
+
+        if initial {
+            break;
+        }
     }
+    Ok(())
 }
 
-pub async fn migrate_data(keeper: Arc<Keeper>, storage_client_idx: usize) -> TribResult<()> {
+pub async fn migrate_data_when_down(
+    keeper: Arc<Keeper>,
+    storage_client_idx: usize,
+) -> TribResult<()> {
     // Backend failure
-    let target_storage_client = *keeper.first_bc_index.read().unwrap() + storage_client_idx as u32;
+    let clone_arc = keeper.live_backends_list_kp.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut live_backends_list_kp = (*locked_val).clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.live_backends_list_bc.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut live_backends_list_bc = (*locked_val).clone();
+    drop(locked_val);
+
+    let keeper_addrs = (*keeper).keeper_addrs.clone();
+    let my_id = (*keeper).my_id;
+    let bc_len = (*keeper).back_addrs.len();
+    let back_addrs = (*keeper).back_addrs.clone();
+
+    let clone_arc = keeper.first_bc_index.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut my_first_back_index = (*locked_val).clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+    let locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+    let mut my_last_back_index = (*locked_val).clone();
+    drop(locked_val);
+
+    let mut i_plus_1_id = 0;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] {
+            i_plus_1_id = (storage_client_idx + i) % bc_len;
+            break;
+        }
+    }
     let sc_i_plus_1 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client + 1) % keeper.backs.len() as u32) as usize]
-        ),
+        addr: format!("http://{}", back_addrs[i_plus_1_id as usize]),
         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     };
-    // let bin_store_client_i_plus_1 = BinStoreClient {
-    //     name: String,
-    //     colon_escaped_name: String,
-    //     clients: Vec<StorageClient>,
-    //     bin_client: sc_i_plus_1,
-    // };
-
+    let mut i_minus_1_id = 0;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx - i + bc_len) % bc_len] {
+            i_minus_1_id = (storage_client_idx - i + bc_len) % bc_len;
+            break;
+        }
+    }
     let sc_i_minus_1 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client - 1) % keeper.backs.len() as u32) as usize]
-        ),
+        addr: format!("http://{}", back_addrs[i_minus_1_id as usize]),
         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     };
-    // let bin_store_client_i_minus_1 = BinStoreClient {
-    //     name: String,
-    //     colon_escaped_name: String,
-    //     clients: Vec<StorageClient>,
-    //     bin_client: sc_i_minus_1,
-    // };
 
+    let mut i_plus_2_id = 0;
+    let mut one_found = false;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] && one_found {
+            i_plus_2_id = (storage_client_idx + i) % bc_len;
+            break;
+        } else if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] {
+            one_found = true;
+        }
+    }
     let sc_i_plus_2 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client + 2) % keeper.backs.len() as u32) as usize]
-        ),
+        addr: format!("http://{}", back_addrs[i_plus_2_id as usize]),
         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     };
-    // let bin_store_client_i_plus_2 = BinStoreClient {
-    //     name: String,
-    //     colon_escaped_name: String,
-    //     clients: Vec<StorageClient>,
-    //     bin_client: sc_i_plus_2,
-    // };
 
     let sc_i_plus_1_secondary_list = sc_i_plus_1.list_get(KEY_SECONDARY_LIST).await?;
     let mut bin_name_hashset = HashSet::new();
@@ -418,14 +720,14 @@ pub async fn migrate_data(keeper: Arc<Keeper>, storage_client_idx: usize) -> Tri
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
             clients: vec![], // TODO: Check later
-            bin_client: sc_i_plus_1,
+            bin_client: sc_i_plus_1.clone(),
         };
 
         let bin_store_client_i_plus_2 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
             clients: vec![], // TODO: Check later
-            bin_client: sc_i_plus_2,
+            bin_client: sc_i_plus_2.clone(),
         };
 
         let storage::List(fetched_log) = bin_store_client_i_plus_1.list_get(KEY_UPDATE_LOG).await?; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
@@ -546,48 +848,85 @@ pub async fn migrate_data(keeper: Arc<Keeper>, storage_client_idx: usize) -> Tri
 
         // let reserialized_log = serde_json::to_string(&deserialized_log)?;
     }
+    live_backends_list_kp.is_alive_list[storage_client_idx as usize] = false;
+    live_backends_list_kp.is_migration_list[storage_client_idx as usize] = false;
 
-    let mut live_backends_list_kp = keeper.live_backends_list_kp.write().unwrap();
-    live_backends_list_kp.is_alive_list[target_storage_client as usize] = false;
-
+    let clone_arc = keeper.live_backends_list_kp.clone();
+    let mut locked_val = clone_arc.lock().await;
+    *locked_val = live_backends_list_kp.clone();
+    drop(locked_val);
     Ok(())
 }
 
 pub async fn migrate_data_when_up(
     keeper: Arc<Keeper>,
-    up_storage_client_idx: usize,
+    storage_client_idx: usize,
 ) -> TribResult<()> {
-    let target_storage_client =
-        *keeper.first_bc_index.read().unwrap() + up_storage_client_idx as u32;
+    let clone_arc = keeper.live_backends_list_kp.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut live_backends_list_kp = (*locked_val).clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.live_backends_list_bc.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut live_backends_list_bc = (*locked_val).clone();
+    drop(locked_val);
+
+    let keeper_addrs = (*keeper).keeper_addrs.clone();
+    let my_id = (*keeper).my_id;
+    let bc_len = (*keeper).back_addrs.len();
+    let back_addrs = (*keeper).back_addrs.clone();
+
+    let clone_arc = keeper.first_bc_index.clone();
+    let locked_val = clone_arc.lock().await;
+    let mut my_first_back_index = (*locked_val).clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
+    let locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
+    let mut my_last_back_index = (*locked_val).clone();
+    drop(locked_val);
+
+    let mut i_plus_1_id = 0;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] {
+            i_plus_1_id = (storage_client_idx + i) % bc_len;
+            break;
+        }
+    }
     let sc_i_plus_1 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client + 1) % keeper.backs.len() as u32) as usize]
-        ),
+        addr: format!("http://{}", back_addrs[i_plus_1_id as usize]),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    let mut i_minus_1_id = 0;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx - i + bc_len) % bc_len] {
+            i_minus_1_id = (storage_client_idx - i + bc_len) % bc_len;
+            break;
+        }
+    }
+    let sc_i_minus_1 = StorageClient {
+        addr: format!("http://{}", back_addrs[i_minus_1_id as usize]),
+        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let mut i_plus_2_id = 0;
+    let mut one_found = false;
+    for i in 1..bc_len {
+        if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] && one_found {
+            i_plus_2_id = (storage_client_idx + i) % bc_len;
+            break;
+        } else if live_backends_list_bc.is_alive_list[(storage_client_idx + i) % bc_len] {
+            one_found = true;
+        }
+    }
+    let sc_i_plus_2 = StorageClient {
+        addr: format!("http://{}", back_addrs[i_plus_2_id as usize]),
         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let sc_i = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client) % keeper.backs.len() as u32) as usize]
-        ),
-        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-
-    let sc_i_minus_1 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client - 1) % keeper.backs.len() as u32) as usize]
-        ),
-        cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-
-    let sc_i_plus_2 = StorageClient {
-        addr: format!(
-            "http://{}",
-            keeper.backs[((target_storage_client + 2) % keeper.backs.len() as u32) as usize]
-        ),
+        addr: format!("http://{}", back_addrs[storage_client_idx as usize]),
         cached_conn: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
@@ -666,7 +1005,7 @@ pub async fn migrate_data_when_up(
     let sc_i_plus_1_primary_list = sc_i_plus_1.list_get(KEY_PRIMARY_LIST).await?;
     let mut bin_name_hashset = HashSet::new();
 
-    let n = keeper.backs.len() as u64;
+    let n = bc_len as u64;
     let mut hasher = DefaultHasher::new();
 
     for bin_name in sc_i_plus_1_primary_list.0 {
@@ -679,7 +1018,7 @@ pub async fn migrate_data_when_up(
         hasher.write(bin_name.clone().as_bytes());
 
         let hash = hasher.finish();
-        if (hash % n) as u32 > target_storage_client {
+        if (hash % n) as u32 > storage_client_idx as u32 {
             continue;
         }
 
@@ -754,9 +1093,13 @@ pub async fn migrate_data_when_up(
         // let reserialized_log = serde_json::to_string(&deserialized_log)?;
     }
 
-    let mut live_backends_list_kp = keeper.live_backends_list_kp.write().unwrap();
-    live_backends_list_kp.is_alive_list[target_storage_client as usize] = true;
+    live_backends_list_kp.is_alive_list[storage_client_idx as usize] = true;
+    live_backends_list_kp.is_migration_list[storage_client_idx as usize] = false;
 
+    let clone_arc = keeper.live_backends_list_kp.clone();
+    let mut locked_val = clone_arc.lock().await;
+    *locked_val = live_backends_list_kp.clone();
+    drop(locked_val);
     Ok(())
 }
 
@@ -780,10 +1123,19 @@ fn remove_duplicates_from_log(log: Vec<UpdateLog>) -> Vec<UpdateLog> {
 /// Additionally, two trait bounds [Send] and [Sync] are required of your
 /// implementation. This should guarantee your front-end is safe to use in the
 /// tribbler front-end service launched by the`trib-front` command
+// #[allow(unused_variables)]
+// pub fn new_front(bin_storage: Box<dyn BinStorage>) -> TribResult<Box<dyn Server + Send + Sync>> {
+//     Ok(Box::new(FrontEnd {
+//         bin_storage: bin_storage,
+//         cached_users: std::sync::Mutex::<Vec<String>>::new(vec![]),
+//     }))
+// }
 #[allow(unused_variables)]
-pub fn new_front(bin_storage: Box<dyn BinStorage>) -> TribResult<Box<dyn Server + Send + Sync>> {
+pub async fn new_front(
+    bin_storage: Box<dyn BinStorage>,
+) -> TribResult<Box<dyn Server + Send + Sync>> {
     Ok(Box::new(FrontEnd {
         bin_storage: bin_storage,
-        cached_users: Mutex::<Vec<String>>::new(vec![]),
+        cached_users: std::sync::Mutex::<Vec<String>>::new(vec![]),
     }))
 }
