@@ -108,7 +108,10 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
 
             let clone_arc = keeper.last_bc_index.clone(); // when you want to get actual values you need to acquire lock and get values
             let mut locked_val = clone_arc.lock().await; // when you just want to pass the arc<Mutex> field to someone then dereference and pass
-            *locked_val = min((curr_start + n - 1), (bc_len - 1) as u32);
+            *locked_val = (curr_start + n - 1) as u32;
+            if i == kp_len - 1 {
+                *locked_val = (bc_len - 1) as u32;
+            }
             drop(locked_val)
         }
         curr_start += n;
@@ -445,9 +448,13 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
     let mut allocations: Vec<Allocation> = vec![];
     let mut curr_start = 0;
     for i in 0..kp_len {
+        let mut a = curr_start + n - 1;
+        if i == kp_len - 1 {
+            a = bc_len - 1;
+        }
         allocations.push(Allocation {
             start: curr_start, // here no need to check wraparound because we will stop at last index
-            end: min((curr_start + n - 1), (bc_len - 1)),
+            end: a,
             is_alive: true,
         });
         curr_start += n;
