@@ -1,6 +1,6 @@
 // This is a wrapper over lab2_bin_store_client
 
-use crate::lab3::storage_client::StorageClient;
+use crate::lab2::storage_client::StorageClient;
 use async_trait::async_trait;
 use std::cmp::Ordering;
 use std::sync::Arc;
