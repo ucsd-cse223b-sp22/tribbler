@@ -14,13 +14,15 @@ Communication between keepers and backends was already established in lab 2. Her
 - `firstBackIndex`: The index of the first backend the keeper is in charge of
 - - `lastBackIndex`: The index of the last backend the keeper is in charge of
 
+Each keeper runs a thread to periodically call `getHeartbeat` on all other keepers. Thus, every keeper gets the aforementioned data from every other keeper. This allows it to update its own state, as well as enforce [fault tolerance](#fault-tolerance-amongst-keepers)
+
 ## Fault tolerance amongst keepers
 The keepers use the `getHeartbeat` rpc to detect whether some other keeper has died. If the `getHeartbeat` rpc fails, then the mapping of keepers to backends changes such that a keeper takes charge of the backends initially allocated to all successive deceased keepers.
 
 ## Data migration
 We define the following terms with respect to a backend:
-- Primary data: The data of which the backend is the original owner, i.e. original data
-- Secondary data The data which is a replica of primary data (which is stored on some other backend), i.e. the copy
+- **Primary data**: The data of which the backend is the original owner, i.e. original data
+- **Secondary data** The data which is a replica of primary data (which is stored on some other backend), i.e. the copy
 
 The keeper performs a clock synchronization amongst the backends that it is in charge of. In doing so, it can keep track of the backends that are alive/dead.  
 When it detects that the backend at index `i` has died, it performs the following:
@@ -29,7 +31,7 @@ When it detects that the backend at index `i` has died, it performs the followin
 - Moves the secondary data of backend `i+1` to primary data of backend `i+1`
 - Copies the primary data of backend `i-1` to secondary data of backend `i+1`
 
-When it detects that the backend at `i` has respawned, it performs the following:
+When it detects that the backend at index `i` has respawned, it performs the following:
 - Gathers the backends at indices `i`, `i+1`, and `i+2`
 - It moves backend `i+1`'s secondary data to backend `i`'s secondary data.
 - It moves the subset of backend `i+1`'s primary data that belonged to backend `i` to `i+1`'s secondary data, and copies that over to `i`'s primary data, and finally removes that data from `i+2`'s secondary data.
