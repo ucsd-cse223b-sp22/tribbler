@@ -151,10 +151,10 @@ impl Lab3BinStoreClient {
 
             let backend_addr = &self.back_addrs[primary_backend_index as usize].clone();
 
-            log::info!(
-                "In find_next_iter()::backend_addr: {}",
-                backend_addr.clone()
-            );
+            // log::info!(
+            //     "In find_next_iter()::backend_addr: {}",
+            //     backend_addr.clone()
+            // );
 
             let clone_bin_client = Arc::clone(&self.bin_client); // TODO: rename bin_client to STORAGE_CLIENT for clarity
             let mut locked_bin_client = clone_bin_client.lock().await;
@@ -3390,7 +3390,7 @@ impl storage::KeyList for Lab3BinStoreClient {
                 {
                     if each_log.seq_num < min_seq_num_till_now {
                         if matches!(each_log.update_operation, UpdateOperation::ListAppend) {
-                            log::info!("{}", each_log.seq_num);
+                            // log::info!("{}", each_log.seq_num);
                             remove_count += 1;
                             min_seq_num_till_now = each_log.seq_num;
                         } else if matches!(each_log.update_operation, UpdateOperation::ListRemove) {
