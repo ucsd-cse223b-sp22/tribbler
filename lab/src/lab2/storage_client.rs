@@ -7,6 +7,7 @@ use tribbler::err::TribResult;
 use tribbler::rpc::trib_storage_client::TribStorageClient;
 use tribbler::{rpc, storage};
 
+#[derive(Clone)]
 pub struct StorageClient {
     pub addr: String,
     pub cached_conn: Arc<Mutex<Option<TribStorageClient<Channel>>>>,
