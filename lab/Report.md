@@ -1,5 +1,5 @@
 # Keepers
-Our keepers are arranged in such a fashion that each keeper is responsible for a subset of the backends and these subsets are disjoint. We will defer the exact specification of the keepers-backends mapping and how fault tolerance amongst keepers is achieved to later in this section  
+Our keepers are arranged in such a fashion that each keeper is responsible for a subset of the backends and these subsets are disjoint. We will defer the exact specification of the keepers-backends mapping and how fault tolerance amongst keepers is achieved to later part of this section.  
 
 We have created a struct to represent a Keeper (found in `keeper_impl.rs`). This struct contains:
 - `live_backends_list_bc`: field required to ensure replication and fault tolerance amongst backends. This list is broadcasted to each of the live backends mapped to that keeper
