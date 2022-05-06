@@ -27,7 +27,7 @@ impl storage::BinStorage for BinStore {
 
         let primary_backend_index = hashed_backend_index;
 
-        log::info!("primary backend index {}", primary_backend_index);
+        //log::info!("primary backend index {}", primary_backend_index);
 
         /* let mut is_primary_found = false;
 
