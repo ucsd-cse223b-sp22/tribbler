@@ -35,3 +35,16 @@ When it detects that the backend at index `i` has respawned, it performs the fol
 - Gathers the backends at indices `i`, `i+1`, and `i+2`
 - It moves backend `i+1`'s secondary data to backend `i`'s secondary data.
 - It moves the subset of backend `i+1`'s primary data that belonged to backend `i` to `i+1`'s secondary data, and copies that over to `i`'s primary data, and finally removes that data from `i+2`'s secondary data.
+
+
+## Bin client
+- Filename: lab3_bin_store_client.rs
+- Even though the title of this section says Bin client, this is actually a wrapper over the bin_store_client implemented in lab2 (file: bin_store_client.rs).
+- This reimplements the functionality of all the KeyValue and KeyList traits of storage.
+- The main design decision while implementing this is to store all the update operations (set, list-append, list-remove) in a log in user specific bins. i.e. each user specific bin has a list names "update_log" which stores all the update operations on all the data in that bin
+- The entrypoint of this structure is a call to new_bin_client() similar to lab 2. This returns an object of the type BinStore which implements the BinStorage trait
+- In the BinStore object, it computes the hash to find the backend on which the user maps. Here we have taken a Chord like approach wherein if a key maps to a particular point on the Chord circle, and if the corresponding backend is not alive, then the data of that user will be found in a successor backend which is alive.
+- The replication factor in the system is 2. Meaning for every data point of every user, there will be 2 copies in the system. For convenience, they are referred as primary and secondary copies.
+- For the update operations (set, list-append and list-remove), the data is written in log on user specific bin in both primary and secondary copy. 
+- For the read operations, an attempt is made to read data from both copies. Such combined data from both locations is then sorted and cleaned by removing duplicates before returning to the client.
+- In both read and update operations, there are various cases wherein a backend might crash in between. In such scenarios, based on the position at which it fails, either the operation is written on another primary or secondary backend to ensure replication factor of 2. 
