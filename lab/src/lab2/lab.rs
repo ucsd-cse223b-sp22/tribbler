@@ -596,7 +596,7 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
         }
         // TODO: Update keeper to backend allocations
         let kp_len = keeper_addrs.len();
-        for j in 1..kp_len - 1 {
+        for j in 1..kp_len {
             if !allocations[(my_id as usize + j) % kp_len].is_alive {
                 my_last_back_index = allocations[(my_id as usize + j) % kp_len].end as u32;
             } else {
