@@ -2497,26 +2497,6 @@ impl storage::KeyList for Lab3BinStoreClient {
     }
 
     async fn list_remove(&self, kv: &storage::KeyValue) -> TribResult<u32> {
-        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        let locked_bin_client_index = clone_bin_client_index.lock().await;
-        let curr_bin_client_index = *locked_bin_client_index;
-        std::mem::drop(locked_bin_client_index);
-
-        let _ = match self.find_next_iter(curr_bin_client_index).await {
-            Ok(val) => val,
-            Err(_) => {
-                // no live backend found, return error
-                return Err(Box::new(TribblerError::Unknown(
-                    "No live backend found".to_string(),
-                )));
-            }
-        };
-
-        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        let locked_bin_store_client = clone_bin_store_client.lock().await;
-        let result = locked_bin_store_client.list_remove(&kv).await?;
-        Ok(result)
-
         // let clone_bin_client_index = Arc::clone(&self.bin_client_index);
         // let locked_bin_client_index = clone_bin_client_index.lock().await;
         // let curr_bin_client_index = *locked_bin_client_index;
@@ -2534,687 +2514,894 @@ impl storage::KeyList for Lab3BinStoreClient {
 
         // let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         // let locked_bin_store_client = clone_bin_store_client.lock().await;
-        // let cached_bin_store_client = (*locked_bin_store_client).clone();
-        // std::mem::drop(locked_bin_store_client);
-
-        // match cached_bin_store_client.clock(0).await {
-        //     Ok(seq_num) => {
-        //         // log::info!("1st success");
-
-        //         // note the new seq num and continue to list append here itself
-        //         let new_update_log = UpdateLog {
-        //             seq_num: seq_num, // DONE-TODO: no plus one here
-        //             update_operation: UpdateOperation::ListRemove,
-        //             kv_params: KeyValue {
-        //                 key: kv.key.clone(),
-        //                 value: kv.value.clone(),
-        //             },
-        //         };
-
-        //         // serialize new_update_log
-        //         let new_update_log_serialized = serde_json::to_string(&new_update_log)?;
-
-        //         let log_append_kv = tribbler::storage::KeyValue {
-        //             key: KEY_UPDATE_LOG.to_string().clone(),
-        //             value: new_update_log_serialized,
-        //         };
-
-        //         // list-append log
-        //         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //         let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //         let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //         std::mem::drop(locked_bin_store_client);
-
-        //         let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
-        //             Ok(_) => {
-        //                 // clock and primary append is successful
-
-        //                 // need to do list-get logs to find how many instances removed
-        //                 // if it is a list remove
-        //                 //     - either there would have been a list-append
-        //                 //     - or the element or list does not exist i.e. elem to be removed is not found or list is empty
-        //                 // so no need to append to primary list in any case, instead do list get
-
-        //                 // add this bin to primary list of the node - SHOULD this be before appending the log? NO
-        //                 // let primary_list_append_kv = tribbler::storage::KeyValue {
-        //                 //     key: KEY_PRIMARY_LIST.to_string().clone(),
-        //                 //     value: self.name.clone(),
-        //                 // };
-
-        //                 // let clone_bin_client = Arc::clone(&self.bin_client);
-        //                 // let locked_bin_client = clone_bin_client.lock().await;
-        //                 // let cached_bin_client = (*locked_bin_client).clone();
-        //                 // std::mem::drop(locked_bin_client);
-
-        //                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //                 let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //                 let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //                 std::mem::drop(locked_bin_store_client);
-
-        //                 let _ = match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
-        //                     Ok(storage::List(fetched_log)) => {
-        //                         // logs fetched successfully
-
-        //                         // deserialize and sort the logs
-        //                         // regenerate data from log and serve query
-        //                         let mut deserialized_log: Vec<UpdateLog> = fetched_log
-        //                             .iter()
-        //                             .map(|x| serde_json::from_str(&x).unwrap())
-        //                             .collect::<Vec<UpdateLog>>();
-
-        //                         // sort the deserialized log as per timestamp
-        //                         // keep the fields in the required order so that they are sorted in that same order.
-        //                         deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
-
-        //                         let reversed_log = deserialized_log.into_iter().rev().collect();
-
-        //                         // just need to keep track of seq_num to avoid considering duplicate ops in log
-        //                         let mut max_seen_seq_num = 0u64;
-
-        //                         //iterate from end and calculate how many elems will this call remove
-        //                         let mut num_removed = 0;
-
-        //                         let mut first_remove_found = false;
-        //                         let mut second_remove_found = false;
-
-        //                         for each_log in deserialized_log {
-        //                             if matches!(
-        //                                 each_log.update_operation,
-        //                                 UpdateOperation::ListRemove
-        //                             ) {
-        //                                 if !first_remove_found {
-        //                                     first_remove_found = true;
-        //                                     continue;
-        //                                 } else {
-        //                                     // second remove found
-        //                                     break;
-        //                                 }
-        //                             } else {
-        //                                 if each_log.kv_params.key.eq(key) {
-        //                                     if each_log.seq_num > max_seen_seq_num {
-        //                                         return_value = each_log.kv_params.value.clone();
-        //                                         max_seen_seq_num = each_log.seq_num;
-        //                                     }
-        //                                 }
-        //                             }
-        //                         }
-
-        //                         // clock, primary append and primary list username append all success
-        //                         // append to secondary
-        //                         let secondary_bin_store_client = match self
-        //                             .find_next_from_live_list()
-        //                             .await
-        //                         {
-        //                             Ok(val) => val,
-        //                             Err(_) => {
-        //                                 // iterate all if live backends list not able to give secondary
-
-        //                                 let clone_bin_client_index =
-        //                                     Arc::clone(&self.bin_client_index);
-        //                                 let locked_bin_client_index =
-        //                                     clone_bin_client_index.lock().await;
-        //                                 let curr_bin_client_index = *locked_bin_client_index;
-        //                                 std::mem::drop(locked_bin_client_index);
-
-        //                                 match self.find_next_iter(curr_bin_client_index + 1).await {
-        //                                     Ok(val) => val,
-        //                                     Err(_) => {
-        //                                         // no live backend found, return None since already written to primary
-        //                                         return Ok(0);
-        //                                     }
-        //                                 }
-        //                             }
-        //                         };
-
-        //                         // list-append log
-        //                         let _ = match secondary_bin_store_client
-        //                             .list_append(&log_append_kv)
-        //                             .await
-        //                         {
-        //                             Ok(_) => {
-        //                                 // secondary append also success
-        //                                 // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                                 let secondary_list_append_kv =
-        //                                     tribbler::storage::KeyValue {
-        //                                         key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                                         value: self.name.clone(),
-        //                                     };
-
-        //                                 let _ = match secondary_bin_store_client
-        //                                     .bin_client
-        //                                     .list_append(&secondary_list_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {
-        //                                         // all success
-        //                                         return Ok(true);
-        //                                     }
-        //                                     Err(_) => {
-        //                                         //first failure
-        //                                         let secondary_bin_store_client =
-        //                                             match self.find_next_from_live_list().await {
-        //                                                 Ok(val) => val,
-        //                                                 Err(_) => {
-        //                                                     // iterate all if live backends list not able to give secondary
-
-        //                                                     let clone_bin_client_index =
-        //                                                         Arc::clone(&self.bin_client_index);
-        //                                                     let locked_bin_client_index =
-        //                                                         clone_bin_client_index.lock().await;
-        //                                                     let curr_bin_client_index =
-        //                                                         *locked_bin_client_index;
-        //                                                     std::mem::drop(locked_bin_client_index);
-
-        //                                                     match self
-        //                                                         .find_next_iter(
-        //                                                             curr_bin_client_index + 1,
-        //                                                         )
-        //                                                         .await
-        //                                                     {
-        //                                                         Ok(val) => val,
-        //                                                         Err(_) => {
-        //                                                             // no live backend found, return None since already written to primary
-        //                                                             return Ok(true);
-        //                                                         }
-        //                                                     }
-        //                                                 }
-        //                                             };
-
-        //                                         // list-append log
-        //                                         let _ = match secondary_bin_store_client
-        //                                             .list_append(&log_append_kv)
-        //                                             .await
-        //                                         {
-        //                                             Ok(_) => {}
-        //                                             Err(_) => {}
-        //                                         }; // what if this fails? suppress error
-
-        //                                         // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                                         let secondary_list_append_kv =
-        //                                             tribbler::storage::KeyValue {
-        //                                                 key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                                                 value: self.name.clone(),
-        //                                             };
-
-        //                                         let _ = match secondary_bin_store_client
-        //                                             .bin_client
-        //                                             .list_append(&secondary_list_append_kv)
-        //                                             .await
-        //                                         {
-        //                                             Ok(_) => {}
-        //                                             Err(_) => {}
-        //                                         }; // what if this fails? suppress error
-
-        //                                         return Ok(true);
-        //                                     }
-        //                                 }; // what if this fails? suppress error
-        //                             }
-        //                             Err(_) => {
-        //                                 // first failure
-
-        //                                 let secondary_bin_store_client =
-        //                                     match self.find_next_from_live_list().await {
-        //                                         Ok(val) => val,
-        //                                         Err(_) => {
-        //                                             // iterate all if live backends list not able to give secondary
-
-        //                                             let clone_bin_client_index =
-        //                                                 Arc::clone(&self.bin_client_index);
-        //                                             let locked_bin_client_index =
-        //                                                 clone_bin_client_index.lock().await;
-        //                                             let curr_bin_client_index =
-        //                                                 *locked_bin_client_index;
-        //                                             std::mem::drop(locked_bin_client_index);
-
-        //                                             match self
-        //                                                 .find_next_iter(curr_bin_client_index + 1)
-        //                                                 .await
-        //                                             {
-        //                                                 Ok(val) => val,
-        //                                                 Err(_) => {
-        //                                                     // no live backend found, return None since already written to primary
-        //                                                     return Ok(true);
-        //                                                 }
-        //                                             }
-        //                                         }
-        //                                     };
-
-        //                                 // list-append log
-        //                                 let _ = match secondary_bin_store_client
-        //                                     .list_append(&log_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {}
-        //                                     Err(_) => {}
-        //                                 }; // what if this fails? suppress error
-
-        //                                 // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                                 let secondary_list_append_kv =
-        //                                     tribbler::storage::KeyValue {
-        //                                         key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                                         value: self.name.clone(),
-        //                                     };
-
-        //                                 let _ = match secondary_bin_store_client
-        //                                     .bin_client
-        //                                     .list_append(&secondary_list_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {}
-        //                                     Err(_) => {}
-        //                                 }; // what if this fails? suppress error
-
-        //                                 return Ok(true);
-        //                             }
-        //                         }; // what if this fails? suppress error
-        //                     }
-        //                     Err(_) => {
-        //                         // what if this fails? 1st failure in this branch
-        //                         // iterate to get another primary and do the whole process. works because 1 failure already
-
-        //                         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        //                         let locked_bin_client_index = clone_bin_client_index.lock().await;
-        //                         let curr_bin_client_index = *locked_bin_client_index;
-        //                         std::mem::drop(locked_bin_client_index);
-
-        //                         let _ = match self.find_next_iter(curr_bin_client_index).await {
-        //                             Ok(val) => val,
-        //                             Err(_) => {
-        //                                 // no live backend found, return error
-        //                                 return Err(Box::new(TribblerError::Unknown(
-        //                                     "No live backend found".to_string(),
-        //                                 )));
-        //                             }
-        //                         };
-
-        //                         // get the new seq num.
-        //                         // generate corresponding BinStoreClient
-        //                         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //                         let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //                         let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //                         std::mem::drop(locked_bin_store_client);
-
-        //                         match cached_bin_store_client.clock(0).await {
-        //                             Ok(seq_num) => {
-        //                                 let new_update_log = UpdateLog {
-        //                                     seq_num: seq_num, // DONE-TODO: no plus one here
-        //                                     update_operation: UpdateOperation::ListRemove,
-        //                                     kv_params: KeyValue {
-        //                                         key: kv.key.clone(),
-        //                                         value: kv.value.clone(),
-        //                                     },
-        //                                 };
-
-        //                                 // serialize new_update_log
-        //                                 let new_update_log_serialized =
-        //                                     serde_json::to_string(&new_update_log)?;
-
-        //                                 let log_append_kv = tribbler::storage::KeyValue {
-        //                                     key: KEY_UPDATE_LOG.to_string().clone(),
-        //                                     value: new_update_log_serialized,
-        //                                 };
-
-        //                                 // list-append log
-        //                                 let clone_bin_store_client =
-        //                                     Arc::clone(&self.bin_store_client);
-        //                                 let locked_bin_store_client =
-        //                                     clone_bin_store_client.lock().await;
-        //                                 let cached_bin_store_client =
-        //                                     (*locked_bin_store_client).clone();
-        //                                 std::mem::drop(locked_bin_store_client);
-
-        //                                 cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
-
-        //                                 // add this bin to primary list of the node - SHOULD this be before appending the log? NO
-        //                                 let primary_list_append_kv = tribbler::storage::KeyValue {
-        //                                     key: KEY_PRIMARY_LIST.to_string().clone(),
-        //                                     value: self.name.clone(),
-        //                                 };
-
-        //                                 let clone_bin_client = Arc::clone(&self.bin_client);
-        //                                 let locked_bin_client = clone_bin_client.lock().await;
-        //                                 let cached_bin_client = (*locked_bin_client).clone();
-        //                                 std::mem::drop(locked_bin_client);
-
-        //                                 let _ = match cached_bin_client
-        //                                     .list_append(&primary_list_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {}
-        //                                     Err(_) => {}
-        //                                 }; // what if this fails? Won't fail bcz 1 failure in this branch
-
-        //                                 // what if primary is there but secondary fails in between writing? Need to write to next alive in the list.
-        //                                 // won't fail in this branch coz 1 failure
-
-        //                                 // also append log to secondary - the next in the live backends list
-        //                                 // get live backends list
-        //                                 let secondary_bin_store_client =
-        //                                     match self.find_next_from_live_list().await {
-        //                                         Ok(val) => val,
-        //                                         Err(_) => {
-        //                                             // iterate all if live backends list not able to give secondary
-
-        //                                             let clone_bin_client_index =
-        //                                                 Arc::clone(&self.bin_client_index);
-        //                                             let locked_bin_client_index =
-        //                                                 clone_bin_client_index.lock().await;
-        //                                             let curr_bin_client_index =
-        //                                                 *locked_bin_client_index;
-        //                                             std::mem::drop(locked_bin_client_index);
-
-        //                                             match self
-        //                                                 .find_next_iter(curr_bin_client_index + 1)
-        //                                                 .await
-        //                                             {
-        //                                                 Ok(val) => val,
-        //                                                 Err(_) => {
-        //                                                     // no live backend found, return None since already written to primary
-        //                                                     return Ok(true);
-        //                                                 }
-        //                                             }
-        //                                         }
-        //                                     };
-
-        //                                 // list-append log
-        //                                 let _ = match secondary_bin_store_client
-        //                                     .list_append(&log_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {}
-        //                                     Err(_) => {}
-        //                                 }; // what if this fails? suppress error
-
-        //                                 // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                                 let secondary_list_append_kv =
-        //                                     tribbler::storage::KeyValue {
-        //                                         key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                                         value: self.name.clone(),
-        //                                     };
-
-        //                                 let _ = match secondary_bin_store_client
-        //                                     .bin_client
-        //                                     .list_append(&secondary_list_append_kv)
-        //                                     .await
-        //                                 {
-        //                                     Ok(_) => {}
-        //                                     Err(_) => {}
-        //                                 }; // what if this fails? suppress error
-
-        //                                 return Ok(true); // may keep a boolean variable to combine result of all
-        //                             }
-        //                             Err(_) => {
-        //                                 // if not found even now, then return error
-        //                                 return Err(Box::new(TribblerError::Unknown(
-        //                                     "Not able to connect".to_string(),
-        //                                 )));
-        //                             }
-        //                         }
-        //                     }
-        //                 };
-        //             }
-        //             Err(_) => {
-        //                 // regenerate clock and start again with one failure in this branch
-
-        //                 let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        //                 let locked_bin_client_index = clone_bin_client_index.lock().await;
-        //                 let curr_bin_client_index = *locked_bin_client_index;
-        //                 std::mem::drop(locked_bin_client_index);
-
-        //                 let _ = match self.find_next_iter(curr_bin_client_index).await {
-        //                     Ok(val) => val,
-        //                     Err(_) => {
-        //                         // no live backend found, return error
-        //                         return Err(Box::new(TribblerError::Unknown(
-        //                             "No live backend found".to_string(),
-        //                         )));
-        //                     }
-        //                 };
-
-        //                 // get the new seq num.
-        //                 // generate corresponding BinStoreClient
-        //                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //                 let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //                 let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //                 std::mem::drop(locked_bin_store_client);
-
-        //                 match cached_bin_store_client.clock(0).await {
-        //                     Ok(seq_num) => {
-        //                         let new_update_log = UpdateLog {
-        //                             seq_num: seq_num, // DONE-TODO: no plus one here
-        //                             update_operation: UpdateOperation::ListRemove,
-        //                             kv_params: KeyValue {
-        //                                 key: kv.key.clone(),
-        //                                 value: kv.value.clone(),
-        //                             },
-        //                         };
-
-        //                         // serialize new_update_log
-        //                         let new_update_log_serialized =
-        //                             serde_json::to_string(&new_update_log)?;
-
-        //                         let log_append_kv = tribbler::storage::KeyValue {
-        //                             key: KEY_UPDATE_LOG.to_string().clone(),
-        //                             value: new_update_log_serialized,
-        //                         };
-
-        //                         // list-append log
-        //                         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //                         let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //                         let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //                         std::mem::drop(locked_bin_store_client);
-
-        //                         cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
-
-        //                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
-        //                         let primary_list_append_kv = tribbler::storage::KeyValue {
-        //                             key: KEY_PRIMARY_LIST.to_string().clone(),
-        //                             value: self.name.clone(),
-        //                         };
-
-        //                         let clone_bin_client = Arc::clone(&self.bin_client);
-        //                         let locked_bin_client = clone_bin_client.lock().await;
-        //                         let cached_bin_client = (*locked_bin_client).clone();
-        //                         std::mem::drop(locked_bin_client);
-
-        //                         let _ = match cached_bin_client
-        //                             .list_append(&primary_list_append_kv)
-        //                             .await
-        //                         {
-        //                             Ok(_) => {}
-        //                             Err(_) => {}
-        //                         }; // what if this fails? Won't fail bcz 1 failure in this branch
-
-        //                         // what if primary is there but secondary fails in between writing? Need to write to next alive in the list.
-        //                         // won't fail in this branch coz 1 failure
-
-        //                         // also append log to secondary - the next in the live backends list
-        //                         // get live backends list
-        //                         let secondary_bin_store_client = match self
-        //                             .find_next_from_live_list()
-        //                             .await
-        //                         {
-        //                             Ok(val) => val,
-        //                             Err(_) => {
-        //                                 // iterate all if live backends list not able to give secondary
-
-        //                                 let clone_bin_client_index =
-        //                                     Arc::clone(&self.bin_client_index);
-        //                                 let locked_bin_client_index =
-        //                                     clone_bin_client_index.lock().await;
-        //                                 let curr_bin_client_index = *locked_bin_client_index;
-        //                                 std::mem::drop(locked_bin_client_index);
-        //                                 match self.find_next_iter(curr_bin_client_index + 1).await {
-        //                                     Ok(val) => val,
-        //                                     Err(_) => {
-        //                                         // no live backend found, return None since already written to primary
-        //                                         return Ok(true);
-        //                                     }
-        //                                 }
-        //                             }
-        //                         };
-
-        //                         // list-append log
-        //                         let _ = match secondary_bin_store_client
-        //                             .list_append(&log_append_kv)
-        //                             .await
-        //                         {
-        //                             Ok(_) => {}
-        //                             Err(_) => {}
-        //                         }; // what if this fails? suppress error
-
-        //                         // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                         let secondary_list_append_kv = tribbler::storage::KeyValue {
-        //                             key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                             value: self.name.clone(),
-        //                         };
-
-        //                         let _ = match secondary_bin_store_client
-        //                             .bin_client
-        //                             .list_append(&secondary_list_append_kv)
-        //                             .await
-        //                         {
-        //                             Ok(_) => {}
-        //                             Err(_) => {}
-        //                         }; // what if this fails? suppress error
-
-        //                         return Ok(true); // may keep a boolean variable to combine result of all
-        //                     }
-        //                     Err(_) => {
-        //                         // if not found even now, then return error
-        //                         return Err(Box::new(TribblerError::Unknown(
-        //                             "Not able to connect".to_string(),
-        //                         )));
-        //                     }
-        //                 }
-        //             }
-        //         }; // This won't fail as already one failure there in this branch
-        //     }
-        //     Err(_) => {
-        //         // error: it just crashed. then find next alive node
-
-        //         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        //         let locked_bin_client_index = clone_bin_client_index.lock().await;
-        //         let curr_bin_client_index = *locked_bin_client_index;
-        //         std::mem::drop(locked_bin_client_index);
-
-        //         let _ = match self.find_next_iter(curr_bin_client_index).await {
-        //             Ok(val) => val,
-        //             Err(_) => {
-        //                 // no live backend found, return error
-        //                 return Err(Box::new(TribblerError::Unknown(
-        //                     "No live backend found".to_string(),
-        //                 )));
-        //             }
-        //         };
-
-        //         // get the new seq num.
-        //         // generate corresponding BinStoreClient
-        //         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //         let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //         let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //         std::mem::drop(locked_bin_store_client);
-
-        //         match cached_bin_store_client.clock(0).await {
-        //             Ok(seq_num) => {
-        //                 let new_update_log = UpdateLog {
-        //                     seq_num: seq_num, // DONE-TODO: no plus one here
-        //                     update_operation: UpdateOperation::ListRemove,
-        //                     kv_params: KeyValue {
-        //                         key: kv.key.clone(),
-        //                         value: kv.value.clone(),
-        //                     },
-        //                 };
-
-        //                 // serialize new_update_log
-        //                 let new_update_log_serialized = serde_json::to_string(&new_update_log)?;
-
-        //                 let log_append_kv = tribbler::storage::KeyValue {
-        //                     key: KEY_UPDATE_LOG.to_string().clone(),
-        //                     value: new_update_log_serialized,
-        //                 };
-
-        //                 // list-append log
-        //                 let clone_bin_store_client = Arc::clone(&self.bin_store_client);
-        //                 let locked_bin_store_client = clone_bin_store_client.lock().await;
-        //                 let cached_bin_store_client = (*locked_bin_store_client).clone();
-        //                 std::mem::drop(locked_bin_store_client);
-
-        //                 cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
-
-        //                 // add this bin to primary list of the node - SHOULD this be before appending the log? NO
-        //                 let primary_list_append_kv = tribbler::storage::KeyValue {
-        //                     key: KEY_PRIMARY_LIST.to_string().clone(),
-        //                     value: self.name.clone(),
-        //                 };
-
-        //                 let clone_bin_client = Arc::clone(&self.bin_client);
-        //                 let locked_bin_client = clone_bin_client.lock().await;
-        //                 let cached_bin_client = (*locked_bin_client).clone();
-        //                 std::mem::drop(locked_bin_client);
-
-        //                 let _ = match cached_bin_client.list_append(&primary_list_append_kv).await {
-        //                     Ok(_) => {}
-        //                     Err(_) => {}
-        //                 }; // what if this fails? Won't fail bcz 1 failure in this branch
-
-        //                 // what if primary is there but secondary fails in between writing? Need to write to next alive in the list.
-        //                 // won't fail in this branch coz 1 failure
-
-        //                 // also append log to secondary - the next in the live backends list
-        //                 // get live backends list
-        //                 let secondary_bin_store_client = match self.find_next_from_live_list().await
-        //                 {
-        //                     Ok(val) => val,
-        //                     Err(_) => {
-        //                         // iterate all if live backends list not able to give secondary
-
-        //                         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
-        //                         let locked_bin_client_index = clone_bin_client_index.lock().await;
-        //                         let curr_bin_client_index = *locked_bin_client_index;
-        //                         std::mem::drop(locked_bin_client_index);
-        //                         match self.find_next_iter(curr_bin_client_index + 1).await {
-        //                             Ok(val) => val,
-        //                             Err(_) => {
-        //                                 // no live backend found, return None since already written to primary
-        //                                 return Ok(true);
-        //                             }
-        //                         }
-        //                     }
-        //                 };
-
-        //                 // list-append log
-        //                 let _ = match secondary_bin_store_client.list_append(&log_append_kv).await {
-        //                     Ok(_) => {}
-        //                     Err(_) => {}
-        //                 }; // what if this fails? suppress error
-
-        //                 // add this bin to secondary list of the node - SHOULD this be before appending the log? NO
-        //                 let secondary_list_append_kv = tribbler::storage::KeyValue {
-        //                     key: KEY_SECONDARY_LIST.to_string().clone(),
-        //                     value: self.name.clone(),
-        //                 };
-
-        //                 let _ = match secondary_bin_store_client
-        //                     .bin_client
-        //                     .list_append(&secondary_list_append_kv)
-        //                     .await
-        //                 {
-        //                     Ok(_) => {}
-        //                     Err(_) => {}
-        //                 }; // what if this fails? suppress error
-
-        //                 return Ok(true); // may keep a boolean variable to combine result of all
-        //             }
-        //             Err(_) => {
-        //                 // if not found even now, then return error
-        //                 return Err(Box::new(TribblerError::Unknown(
-        //                     "Not able to connect".to_string(),
-        //                 )));
-        //             }
-        //         }
-        //     }
-        // };
+        // let result = locked_bin_store_client.list_remove(&kv).await?;
+        // Ok(result)
+
+        let mut global_seq_num = 0u64;
+        let mut combined_log: Vec<UpdateLog> = Vec::new();
+
+        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+        let locked_bin_client_index = clone_bin_client_index.lock().await;
+        let curr_bin_client_index = *locked_bin_client_index;
+        std::mem::drop(locked_bin_client_index);
+
+        let _ = match self.find_next_iter(curr_bin_client_index).await {
+            Ok(val) => val,
+            Err(_) => {
+                // no live backend found, return error
+                return Err(Box::new(TribblerError::Unknown(
+                    "No live backend found".to_string(),
+                )));
+            }
+        };
+
+        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+        let locked_bin_store_client = clone_bin_store_client.lock().await;
+        let cached_bin_store_client = (*locked_bin_store_client).clone();
+        std::mem::drop(locked_bin_store_client);
+
+        let remove_result: TribResult<u32> = match cached_bin_store_client.clock(0).await {
+            Ok(seq_num) => {
+                // log::info!("1st success");
+
+                // note the new seq num and continue to list append here itself
+                let new_update_log = UpdateLog {
+                    seq_num: seq_num, // DONE-TODO: no plus one here
+                    update_operation: UpdateOperation::ListRemove,
+                    kv_params: KeyValue {
+                        key: kv.key.clone(),
+                        value: kv.value.clone(),
+                    },
+                };
+
+                global_seq_num = seq_num;
+
+                // serialize new_update_log
+                let new_update_log_serialized = serde_json::to_string(&new_update_log)?;
+
+                let log_append_kv = tribbler::storage::KeyValue {
+                    key: KEY_UPDATE_LOG.to_string().clone(),
+                    value: new_update_log_serialized,
+                };
+
+                // list-append log
+                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                let locked_bin_store_client = clone_bin_store_client.lock().await;
+                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                std::mem::drop(locked_bin_store_client);
+
+                let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
+                    Ok(_) => {
+                        // clock and primary append is successful
+                        // log::info!("2 success");
+
+                        // let fetched_log_result: Option<storage::List> =
+                        //     match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                        //         Ok(v) => Some(v), // 1st shot, got log
+                        //         Err(_) => {
+                        //             // A live backend just crashed; 2nd attempt by iterating through the list to find the next alive
+
+                        //             let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                        //             let locked_bin_client_index =
+                        //                 clone_bin_client_index.lock().await;
+                        //             let curr_bin_client_index = *locked_bin_client_index;
+                        //             std::mem::drop(locked_bin_client_index);
+
+                        //             let _ = match self.find_next_iter(curr_bin_client_index).await {
+                        //                 Ok(val) => val,
+                        //                 Err(_) => {
+                        //                     // no live backend found, return error
+                        //                     return Err(Box::new(TribblerError::Unknown(
+                        //                         "No live backend found".to_string(),
+                        //                     )));
+                        //                 }
+                        //             };
+
+                        //             let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                        //             let locked_bin_store_client =
+                        //                 clone_bin_store_client.lock().await;
+                        //             let cached_bin_store_client =
+                        //                 (*locked_bin_store_client).clone();
+                        //             std::mem::drop(locked_bin_store_client);
+
+                        //             match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                        //                 Ok(v) => Some(v), // got the log
+                        //                 Err(_) => {
+                        //                     // this should not return error
+                        //                     // continue to secondary
+                        //                     None
+                        //                 }
+                        //             }
+                        //         }
+                        //     };
+
+                        // if let Some(storage::List(fetched_log)) = fetched_log_result {
+                        //     // regenerate data from log and serve query
+                        //     let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                        //         .iter()
+                        //         .map(|x| serde_json::from_str(&x).unwrap())
+                        //         .collect::<Vec<UpdateLog>>();
+
+                        //     // sort the deserialized log as per timestamp
+                        //     // keep the fields in the required order so that they are sorted in that same order.
+                        //     // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                        //     combined_log.append(&mut deserialized_log);
+                        // }
+
+                        // // get from secondary as well
+                        // let secondary_bin_store_client_result: Option<BinStoreClient> =
+                        //     match self.find_next_from_live_list().await {
+                        //         //let secondary_bin_store_client = match self.find_next_from_live_list().await {
+                        //         Ok(val) => Some(val),
+                        //         Err(_) => {
+                        //             // iterate all if live backends list not able to give secondary
+
+                        //             let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                        //             let locked_bin_client_index =
+                        //                 clone_bin_client_index.lock().await;
+                        //             let curr_bin_client_index = *locked_bin_client_index;
+                        //             std::mem::drop(locked_bin_client_index);
+
+                        //             match self
+                        //                 .find_next_iter_secondary(curr_bin_client_index + 1)
+                        //                 .await
+                        //             {
+                        //                 Ok(val) => Some(val),
+                        //                 Err(_) => {
+                        //                     // no live backend found, return None since a backend exists but doesn't have data
+                        //                     None
+                        //                 } // do nothing now
+                        //             }
+                        //         }
+                        //     };
+
+                        // // secondary bin store client now contains pointer to secondary node
+
+                        // if let Some(secondary_bin_store_client) = secondary_bin_store_client_result
+                        // {
+                        //     // get log
+                        //     let fetched_log_result: Option<storage::List> =
+                        //         match secondary_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                        //             Ok(val) => Some(val),
+                        //             Err(_) => {
+                        //                 // no log data available
+                        //                 // do nothing
+                        //                 None
+                        //             }
+                        //         }; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+
+                        //     if let Some(storage::List(fetched_log)) = fetched_log_result {
+                        //         let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                        //             .iter()
+                        //             .map(|x| serde_json::from_str(&x).unwrap())
+                        //             .collect::<Vec<UpdateLog>>();
+
+                        //         combined_log.append(&mut deserialized_log);
+                        //     }
+                        // }
+
+                        // ***********************************************
+                        // fetch log instead of primary list append
+                        let _ = match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                            Ok(storage::List(fetched_log)) => {
+                                // if successful, store the log and append operation to secondary
+                                let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                                    .iter()
+                                    .map(|x| serde_json::from_str(&x).unwrap())
+                                    .collect::<Vec<UpdateLog>>();
+
+                                // sort the deserialized log as per timestamp
+                                // keep the fields in the required order so that they are sorted in that same order.
+                                // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                combined_log.append(&mut deserialized_log);
+
+                                // append op to secondary
+                                let secondary_bin_store_client_result =
+                                    match self.find_next_from_live_list().await {
+                                        Ok(val) => Some(val),
+                                        Err(_) => {
+                                            // iterate all if live backends list not able to give secondary
+
+                                            let clone_bin_client_index =
+                                                Arc::clone(&self.bin_client_index);
+                                            let locked_bin_client_index =
+                                                clone_bin_client_index.lock().await;
+                                            let curr_bin_client_index = *locked_bin_client_index;
+                                            std::mem::drop(locked_bin_client_index);
+
+                                            match self
+                                                .find_next_iter_secondary(curr_bin_client_index + 1)
+                                                .await
+                                            {
+                                                Ok(val) => Some(val),
+                                                Err(_) => {
+                                                    // no live backend found, return None since already written to primary
+                                                    None
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                if let Some(secondary_bin_store_client) =
+                                    secondary_bin_store_client_result
+                                {
+                                    // list-append log
+                                    let _ = match secondary_bin_store_client
+                                        .list_append(&log_append_kv)
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            // secondary append also success
+
+                                            // get log
+                                            let _ = match secondary_bin_store_client
+                                                .list_get(KEY_UPDATE_LOG)
+                                                .await
+                                            {
+                                                Ok(storage::List(fetched_log)) => {
+                                                    // all success
+                                                    let mut deserialized_log: Vec<UpdateLog> =
+                                                        fetched_log
+                                                            .iter()
+                                                            .map(|x| {
+                                                                serde_json::from_str(&x).unwrap()
+                                                            })
+                                                            .collect::<Vec<UpdateLog>>();
+
+                                                    // sort the deserialized log as per timestamp
+                                                    // keep the fields in the required order so that they are sorted in that same order.
+                                                    // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                                    combined_log.append(&mut deserialized_log);
+
+                                                    //Ok(0)
+                                                }
+                                                Err(_) => {
+                                                    //first failure
+                                                    // try to find another secondary and write log and get log
+                                                    let secondary_bin_store_client_result =
+                                                        match self.find_next_from_live_list().await
+                                                        {
+                                                            Ok(val) => Some(val),
+                                                            Err(_) => {
+                                                                // iterate all if live backends list not able to give secondary
+
+                                                                let clone_bin_client_index =
+                                                                    Arc::clone(
+                                                                        &self.bin_client_index,
+                                                                    );
+                                                                let locked_bin_client_index =
+                                                                    clone_bin_client_index
+                                                                        .lock()
+                                                                        .await;
+                                                                let curr_bin_client_index =
+                                                                    *locked_bin_client_index;
+                                                                std::mem::drop(
+                                                                    locked_bin_client_index,
+                                                                );
+
+                                                                match self
+                                                                    .find_next_iter_secondary(
+                                                                        curr_bin_client_index + 1,
+                                                                    )
+                                                                    .await
+                                                                {
+                                                                    Ok(val) => Some(val),
+                                                                    Err(_) => {
+                                                                        // no live backend found, return None since already written to primary
+                                                                        None
+                                                                    }
+                                                                }
+                                                            }
+                                                        };
+
+                                                    if let Some(secondary_bin_store_client) =
+                                                        secondary_bin_store_client_result
+                                                    {
+                                                        // list-append log
+                                                        let _ = match secondary_bin_store_client
+                                                            .list_append(&log_append_kv)
+                                                            .await
+                                                        {
+                                                            Ok(_) => {}
+                                                            Err(_) => {}
+                                                        };
+
+                                                        // get log
+                                                        let _ = match secondary_bin_store_client
+                                                            .list_get(KEY_UPDATE_LOG)
+                                                            .await
+                                                        {
+                                                            Ok(storage::List(fetched_log)) => {
+                                                                // all success
+                                                                let mut deserialized_log: Vec<
+                                                                    UpdateLog,
+                                                                > = fetched_log
+                                                                    .iter()
+                                                                    .map(|x| {
+                                                                        serde_json::from_str(&x)
+                                                                            .unwrap()
+                                                                    })
+                                                                    .collect::<Vec<UpdateLog>>();
+
+                                                                // sort the deserialized log as per timestamp
+                                                                // keep the fields in the required order so that they are sorted in that same order.
+                                                                // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                                                combined_log
+                                                                    .append(&mut deserialized_log);
+
+                                                                //Ok(0)
+                                                            }
+                                                            Err(_) => {}
+                                                        };
+                                                    };
+                                                    //Ok(0)
+                                                }
+                                            }; // would have data. crash not possible because reached here due to crash of primary or primary not having data due to just coming alive
+                                               // what if this fails? suppress error
+                                        }
+                                        Err(_) => {
+                                            // first failure
+
+                                            let secondary_bin_store_client_result =
+                                                match self.find_next_from_live_list().await {
+                                                    Ok(val) => Some(val),
+                                                    Err(_) => {
+                                                        // iterate all if live backends list not able to give secondary
+
+                                                        let clone_bin_client_index =
+                                                            Arc::clone(&self.bin_client_index);
+                                                        let locked_bin_client_index =
+                                                            clone_bin_client_index.lock().await;
+                                                        let curr_bin_client_index =
+                                                            *locked_bin_client_index;
+                                                        std::mem::drop(locked_bin_client_index);
+
+                                                        match self
+                                                            .find_next_iter_secondary(
+                                                                curr_bin_client_index + 1,
+                                                            )
+                                                            .await
+                                                        {
+                                                            Ok(val) => Some(val),
+                                                            Err(_) => {
+                                                                // no live backend found, return None since already written to primary
+                                                                None
+                                                            }
+                                                        }
+                                                    }
+                                                };
+
+                                            if let Some(secondary_bin_store_client) =
+                                                secondary_bin_store_client_result
+                                            {
+                                                let _ = match secondary_bin_store_client
+                                                    .list_append(&log_append_kv)
+                                                    .await
+                                                {
+                                                    Ok(_) => {}
+                                                    Err(_) => {}
+                                                }; // what if this fails? suppress error
+                                            }
+
+                                            // get log
+                                            let _ = match secondary_bin_store_client
+                                                .list_get(KEY_UPDATE_LOG)
+                                                .await
+                                            {
+                                                Ok(storage::List(fetched_log)) => {
+                                                    // all success
+                                                    let mut deserialized_log: Vec<UpdateLog> =
+                                                        fetched_log
+                                                            .iter()
+                                                            .map(|x| {
+                                                                serde_json::from_str(&x).unwrap()
+                                                            })
+                                                            .collect::<Vec<UpdateLog>>();
+
+                                                    // sort the deserialized log as per timestamp
+                                                    // keep the fields in the required order so that they are sorted in that same order.
+                                                    // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                                    combined_log.append(&mut deserialized_log);
+
+                                                    //Ok(0)
+                                                }
+                                                Err(_) => {}
+                                            };
+
+                                            //return Ok(true);
+                                        }
+                                    };
+                                }
+                            }
+                            Err(_) => {
+                                // what if this fails? 1st failure in this branch
+                                // iterate to get another primary and do the whole process. works because 1 failure already
+
+                                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                                let curr_bin_client_index = *locked_bin_client_index;
+                                std::mem::drop(locked_bin_client_index);
+
+                                let _ = match self.find_next_iter(curr_bin_client_index).await {
+                                    Ok(val) => val,
+                                    Err(_) => {
+                                        // no live backend found, return error
+                                        return Err(Box::new(TribblerError::Unknown(
+                                            "No live backend found".to_string(),
+                                        )));
+                                    }
+                                };
+
+                                // get the new seq num.
+                                // generate corresponding BinStoreClient
+                                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                                let locked_bin_store_client = clone_bin_store_client.lock().await;
+                                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                                std::mem::drop(locked_bin_store_client);
+
+                                match cached_bin_store_client.clock(0).await {
+                                    Ok(seq_num) => {
+                                        let new_update_log = UpdateLog {
+                                            seq_num: seq_num, // DONE-TODO: no plus one here
+                                            update_operation: UpdateOperation::ListRemove,
+                                            kv_params: KeyValue {
+                                                key: kv.key.clone(),
+                                                value: kv.value.clone(),
+                                            },
+                                        };
+
+                                        global_seq_num = seq_num;
+
+                                        // serialize new_update_log
+                                        let new_update_log_serialized =
+                                            serde_json::to_string(&new_update_log)?;
+
+                                        let log_append_kv = tribbler::storage::KeyValue {
+                                            key: KEY_UPDATE_LOG.to_string().clone(),
+                                            value: new_update_log_serialized,
+                                        };
+
+                                        // list-append log
+                                        let clone_bin_store_client =
+                                            Arc::clone(&self.bin_store_client);
+                                        let locked_bin_store_client =
+                                            clone_bin_store_client.lock().await;
+                                        let cached_bin_store_client =
+                                            (*locked_bin_store_client).clone();
+                                        std::mem::drop(locked_bin_store_client);
+
+                                        cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+
+                                        let _ = match cached_bin_store_client
+                                            .list_get(KEY_UPDATE_LOG)
+                                            .await
+                                        {
+                                            Ok(storage::List(fetched_log)) => {
+                                                // if successful, store the log and append operation to secondary
+                                                let mut deserialized_log: Vec<UpdateLog> =
+                                                    fetched_log
+                                                        .iter()
+                                                        .map(|x| serde_json::from_str(&x).unwrap())
+                                                        .collect::<Vec<UpdateLog>>();
+
+                                                // sort the deserialized log as per timestamp
+                                                // keep the fields in the required order so that they are sorted in that same order.
+                                                // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                                combined_log.append(&mut deserialized_log);
+                                            }
+                                            Err(_) => {} //won't fail coz 1 failure
+                                        };
+
+                                        let secondary_bin_store_client_result =
+                                            match self.find_next_from_live_list().await {
+                                                Ok(val) => Some(val),
+                                                Err(_) => {
+                                                    // iterate all if live backends list not able to give secondary
+
+                                                    let clone_bin_client_index =
+                                                        Arc::clone(&self.bin_client_index);
+                                                    let locked_bin_client_index =
+                                                        clone_bin_client_index.lock().await;
+                                                    let curr_bin_client_index =
+                                                        *locked_bin_client_index;
+                                                    std::mem::drop(locked_bin_client_index);
+
+                                                    match self
+                                                        .find_next_iter_secondary(
+                                                            curr_bin_client_index + 1,
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(val) => Some(val),
+                                                        Err(_) => {
+                                                            // no live backend found, return None since already written to primary
+                                                            None
+                                                        }
+                                                    }
+                                                }
+                                            };
+
+                                        if let Some(secondary_bin_store_client) =
+                                            secondary_bin_store_client_result
+                                        {
+                                            let _ = match secondary_bin_store_client
+                                                .list_append(&log_append_kv)
+                                                .await
+                                            {
+                                                Ok(_) => {}
+                                                Err(_) => {}
+                                            }; // what if this fails? suppress error
+
+                                            let _ = match secondary_bin_store_client
+                                                .list_get(KEY_UPDATE_LOG)
+                                                .await
+                                            {
+                                                Ok(storage::List(fetched_log)) => {
+                                                    // all success
+                                                    let mut deserialized_log: Vec<UpdateLog> =
+                                                        fetched_log
+                                                            .iter()
+                                                            .map(|x| {
+                                                                serde_json::from_str(&x).unwrap()
+                                                            })
+                                                            .collect::<Vec<UpdateLog>>();
+
+                                                    // sort the deserialized log as per timestamp
+                                                    // keep the fields in the required order so that they are sorted in that same order.
+                                                    // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                                    combined_log.append(&mut deserialized_log);
+
+                                                    //Ok(0)
+                                                }
+                                                Err(_) => {}
+                                            };
+                                        }
+
+                                        //return Ok(true); // may keep a boolean variable to combine result of all
+                                    }
+                                    Err(_) => {
+                                        // if not found even now, then return error
+                                        // return Err(Box::new(TribblerError::Unknown(
+                                        //     "Not able to connect".to_string(),
+                                        // )));
+                                    }
+                                }
+                            }
+                        };
+                    }
+                    Err(_) => {
+                        // regenerate clock and start again with one failure in this branch
+
+                        let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                        let locked_bin_client_index = clone_bin_client_index.lock().await;
+                        let curr_bin_client_index = *locked_bin_client_index;
+                        std::mem::drop(locked_bin_client_index);
+
+                        let _ = match self.find_next_iter(curr_bin_client_index).await {
+                            Ok(val) => val,
+                            Err(_) => {
+                                // no live backend found, return error
+                                return Err(Box::new(TribblerError::Unknown(
+                                    "No live backend found".to_string(),
+                                )));
+                            }
+                        };
+
+                        // get the new seq num.
+                        // generate corresponding BinStoreClient
+                        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                        let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let cached_bin_store_client = (*locked_bin_store_client).clone();
+                        std::mem::drop(locked_bin_store_client);
+
+                        match cached_bin_store_client.clock(0).await {
+                            Ok(seq_num) => {
+                                let new_update_log = UpdateLog {
+                                    seq_num: seq_num, // DONE-TODO: no plus one here
+                                    update_operation: UpdateOperation::ListRemove,
+                                    kv_params: KeyValue {
+                                        key: kv.key.clone(),
+                                        value: kv.value.clone(),
+                                    },
+                                };
+
+                                global_seq_num = seq_num;
+
+                                // serialize new_update_log
+                                let new_update_log_serialized =
+                                    serde_json::to_string(&new_update_log)?;
+
+                                let log_append_kv = tribbler::storage::KeyValue {
+                                    key: KEY_UPDATE_LOG.to_string().clone(),
+                                    value: new_update_log_serialized,
+                                };
+
+                                // list-append log
+                                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                                let locked_bin_store_client = clone_bin_store_client.lock().await;
+                                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                                std::mem::drop(locked_bin_store_client);
+
+                                cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+
+                                let _ = match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await
+                                {
+                                    Ok(storage::List(fetched_log)) => {
+                                        // if successful, store the log and append operation to secondary
+                                        let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                                            .iter()
+                                            .map(|x| serde_json::from_str(&x).unwrap())
+                                            .collect::<Vec<UpdateLog>>();
+
+                                        // sort the deserialized log as per timestamp
+                                        // keep the fields in the required order so that they are sorted in that same order.
+                                        // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                        combined_log.append(&mut deserialized_log);
+                                    }
+                                    Err(_) => {} //won't fail coz 1 failure
+                                };
+
+                                let secondary_bin_store_client_result =
+                                    match self.find_next_from_live_list().await {
+                                        Ok(val) => Some(val),
+                                        Err(_) => {
+                                            // iterate all if live backends list not able to give secondary
+
+                                            let clone_bin_client_index =
+                                                Arc::clone(&self.bin_client_index);
+                                            let locked_bin_client_index =
+                                                clone_bin_client_index.lock().await;
+                                            let curr_bin_client_index = *locked_bin_client_index;
+                                            std::mem::drop(locked_bin_client_index);
+
+                                            match self
+                                                .find_next_iter_secondary(curr_bin_client_index + 1)
+                                                .await
+                                            {
+                                                Ok(val) => Some(val),
+                                                Err(_) => {
+                                                    // no live backend found, return None since already written to primary
+                                                    None
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                if let Some(secondary_bin_store_client) =
+                                    secondary_bin_store_client_result
+                                {
+                                    let _ = match secondary_bin_store_client
+                                        .list_append(&log_append_kv)
+                                        .await
+                                    {
+                                        Ok(_) => {}
+                                        Err(_) => {}
+                                    }; // what if this fails? suppress error
+
+                                    let _ = match secondary_bin_store_client
+                                        .list_get(KEY_UPDATE_LOG)
+                                        .await
+                                    {
+                                        Ok(storage::List(fetched_log)) => {
+                                            // all success
+                                            let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                                                .iter()
+                                                .map(|x| serde_json::from_str(&x).unwrap())
+                                                .collect::<Vec<UpdateLog>>();
+
+                                            // sort the deserialized log as per timestamp
+                                            // keep the fields in the required order so that they are sorted in that same order.
+                                            // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                            combined_log.append(&mut deserialized_log);
+
+                                            //Ok(0)
+                                        }
+                                        Err(_) => {}
+                                    };
+                                }
+                                //return Ok(true)
+                            }
+                            Err(_) => {
+                                // if not found even now, then return error
+                                return Err(Box::new(TribblerError::Unknown(
+                                    "Not able to connect".to_string(),
+                                )));
+                            }
+                        }
+                    }
+                }; // This won't fail as already one failure there in this branch
+
+                Ok(0)
+            }
+            Err(_) => {
+                // error: it just crashed. then find next alive node
+
+                let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                let locked_bin_client_index = clone_bin_client_index.lock().await;
+                let curr_bin_client_index = *locked_bin_client_index;
+                std::mem::drop(locked_bin_client_index);
+
+                let _ = match self.find_next_iter(curr_bin_client_index).await {
+                    Ok(val) => val,
+                    Err(_) => {
+                        // no live backend found, return error
+                        return Err(Box::new(TribblerError::Unknown(
+                            "No live backend found".to_string(),
+                        )));
+                    }
+                };
+
+                // get the new seq num.
+                // generate corresponding BinStoreClient
+                let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                let locked_bin_store_client = clone_bin_store_client.lock().await;
+                let cached_bin_store_client = (*locked_bin_store_client).clone();
+                std::mem::drop(locked_bin_store_client);
+
+                match cached_bin_store_client.clock(0).await {
+                    Ok(seq_num) => {
+                        let new_update_log = UpdateLog {
+                            seq_num: seq_num, // DONE-TODO: no plus one here
+                            update_operation: UpdateOperation::ListRemove,
+                            kv_params: KeyValue {
+                                key: kv.key.clone(),
+                                value: kv.value.clone(),
+                            },
+                        };
+
+                        global_seq_num = seq_num; // u64 is automatically copied
+
+                        // serialize new_update_log
+                        let new_update_log_serialized = serde_json::to_string(&new_update_log)?;
+
+                        let log_append_kv = tribbler::storage::KeyValue {
+                            key: KEY_UPDATE_LOG.to_string().clone(),
+                            value: new_update_log_serialized,
+                        };
+
+                        // list-append log
+                        let clone_bin_store_client = Arc::clone(&self.bin_store_client);
+                        let locked_bin_store_client = clone_bin_store_client.lock().await;
+                        let cached_bin_store_client = (*locked_bin_store_client).clone();
+                        std::mem::drop(locked_bin_store_client);
+
+                        cached_bin_store_client.list_append(&log_append_kv).await?; // This won't fail as already one failure there in this branch
+
+                        let _ = match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
+                            Ok(storage::List(fetched_log)) => {
+                                // if successful, store the log and append operation to secondary
+                                let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                                    .iter()
+                                    .map(|x| serde_json::from_str(&x).unwrap())
+                                    .collect::<Vec<UpdateLog>>();
+
+                                // sort the deserialized log as per timestamp
+                                // keep the fields in the required order so that they are sorted in that same order.
+                                // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                combined_log.append(&mut deserialized_log);
+                            }
+                            Err(_) => {}
+                        };
+
+                        // also append log list remove to secondary - the next in the live backends list
+                        let secondary_bin_store_client_result =
+                            match self.find_next_from_live_list().await {
+                                Ok(val) => Some(val),
+                                Err(_) => {
+                                    // iterate all if live backends list not able to give secondary
+
+                                    let clone_bin_client_index = Arc::clone(&self.bin_client_index);
+                                    let locked_bin_client_index =
+                                        clone_bin_client_index.lock().await;
+                                    let curr_bin_client_index = *locked_bin_client_index;
+                                    std::mem::drop(locked_bin_client_index);
+
+                                    match self
+                                        .find_next_iter_secondary(curr_bin_client_index + 1)
+                                        .await
+                                    {
+                                        Ok(val) => Some(val),
+                                        Err(_) => {
+                                            // no live backend found, return None since already written to primary
+                                            None
+                                        }
+                                    }
+                                }
+                            };
+
+                        if let Some(secondary_bin_store_client) = secondary_bin_store_client_result
+                        {
+                            let _ = match secondary_bin_store_client
+                                .list_append(&log_append_kv)
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(_) => {}
+                            }; // what if this fails? suppress error
+
+                            let _ = match secondary_bin_store_client.list_get(KEY_UPDATE_LOG).await
+                            {
+                                Ok(storage::List(fetched_log)) => {
+                                    // all success
+                                    let mut deserialized_log: Vec<UpdateLog> = fetched_log
+                                        .iter()
+                                        .map(|x| serde_json::from_str(&x).unwrap())
+                                        .collect::<Vec<UpdateLog>>();
+
+                                    // sort the deserialized log as per timestamp
+                                    // keep the fields in the required order so that they are sorted in that same order.
+                                    // deserialized_log.sort(); // sorts in place, since first field is seq_num, it sorts acc to seq_num
+
+                                    combined_log.append(&mut deserialized_log);
+
+                                    //Ok(0)
+                                }
+                                Err(_) => {}
+                            };
+                        }
+
+                        //Ok(0) // may keep a boolean variable to combine result of all
+                    }
+                    Err(_) => {
+                        // if not found even now, then return error
+                        return Err(Box::new(TribblerError::Unknown(
+                            "Not able to connect".to_string(),
+                        )));
+                    }
+                }
+                Ok(0)
+            }
+        };
+
+        // we have the logs and the seq_num
+
+        // sort the logs
+        combined_log.sort();
+
+        combined_log.reverse();
+        // reverse iterate and count removes from remove at curr seq_num to next remove op
+        let mut start_counting = false;
+        let mut remove_count = 0;
+
+        let mut min_seq_num_till_now = global_seq_num;
+
+        for each_log in combined_log {
+            if each_log.seq_num == global_seq_num {
+                start_counting = true;
+            }
+
+            if start_counting {
+                if each_log.kv_params.key.clone().eq(kv.key.clone().as_str())
+                    && each_log
+                        .kv_params
+                        .value
+                        .clone()
+                        .eq(kv.value.clone().as_str())
+                {
+                    if each_log.seq_num < min_seq_num_till_now {
+                        if matches!(each_log.update_operation, UpdateOperation::ListAppend) {
+                            log::info!("{}", each_log.seq_num);
+                            remove_count += 1;
+                            min_seq_num_till_now = each_log.seq_num;
+                        } else if matches!(each_log.update_operation, UpdateOperation::ListRemove) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return Ok(remove_count);
     }
 
     async fn list_keys(&self, p: &storage::Pattern) -> TribResult<storage::List> {
