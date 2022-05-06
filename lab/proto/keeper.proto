@@ -5,3 +5,16 @@ syntax = "proto3";
 package keeper;
 
 // Add your message and service definitions below this line
+import "google/protobuf/empty.proto";
+
+message Heartbeat {
+    uint64 maxClock = 1;
+    string liveBackList = 2;
+    uint32 keeperIndex = 3;
+    uint32 firstBackIndex = 4;
+    uint32 lastBackIndex = 5;
+}
+
+service KeeperSync {
+    rpc getHeartbeat(google.protobuf.Empty) returns (Heartbeat);
+}

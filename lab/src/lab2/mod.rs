@@ -601,11 +601,13 @@
 //!
 //! ## Happy Lab 2!
 //!
+pub mod keeper_impl;
 mod lab;
+pub mod lab3_bin_store_client;
 pub use crate::lab2::lab::new_bin_client;
 pub use crate::lab2::lab::new_front;
 pub use crate::lab2::lab::serve_keeper;
-mod bin_store;
+pub mod bin_store;
 mod bin_store_client;
 mod frontend;
 mod lab3_bin_store_client;

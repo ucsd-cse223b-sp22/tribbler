@@ -3,7 +3,6 @@ use async_trait::async_trait;
 
 use tribbler::colon;
 use tribbler::{err::TribResult, storage};
-
 #[derive(Clone)]
 pub struct BinStoreClient {
     pub name: String,

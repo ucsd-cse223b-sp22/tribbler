@@ -30,7 +30,7 @@ pub struct Lab3BinStoreClient {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum UpdateOperation {
+pub enum UpdateOperation {
     Set,
     ListAppend,
     ListRemove,
@@ -47,10 +47,10 @@ pub struct KeyValue {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct UpdateLog {
-    seq_num: u64,
-    update_operation: UpdateOperation,
-    kv_params: KeyValue, // override  KeyValue and implement serialize for it
+pub struct UpdateLog {
+    pub seq_num: u64,
+    pub update_operation: UpdateOperation,
+    pub kv_params: KeyValue, // override  KeyValue and implement serialize for it
 }
 
 impl Ord for UpdateLog {
@@ -74,9 +74,10 @@ impl PartialEq for UpdateLog {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct LiveBackends {
-    backs: Vec<String>,
-    is_alive_list: Vec<bool>,
+pub struct LiveBackends {
+    pub backs: Vec<String>,
+    pub is_alive_list: Vec<bool>,
+    pub is_migration_list: Vec<bool>,
 }
 
 impl Lab3BinStoreClient {
