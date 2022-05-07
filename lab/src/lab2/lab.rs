@@ -2,6 +2,7 @@ use crate::{
     keeper::{keeper_sync_client::KeeperSyncClient, keeper_sync_server::KeeperSyncServer},
     lab2::bin_store::BinStore,
 };
+use log::warn;
 use std::{
     cmp::min,
     collections::{hash_map::DefaultHasher, HashSet},
@@ -9,7 +10,7 @@ use std::{
     net::ToSocketAddrs,
     sync::Arc,
 };
-use tokio::sync::Mutex;
+use tokio::{join, sync::Mutex};
 
 use tokio::time::{self, interval};
 use tribbler::{
@@ -90,8 +91,9 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
         my_id: MY_ID,
         cached_conn: CACHED_CONN.clone(),
     });
+
     // STARTED RPC SERVER
-    tokio::spawn(build_and_serve_keeper_server(keeper.clone()));
+    let mut handle = tokio::spawn(build_and_serve_keeper_server(keeper.clone(), kc.shutdown));
 
     // INITIAL BACKEND ALLOCATION TO KEEPER
     let bc_len = kc.backs.len();
@@ -131,13 +133,12 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     tokio::spawn(sync_clocks_and_compute_live_bc(keeper.clone(), false));
     tokio::spawn(run_keeper_heartbeat(keeper.clone(), false));
 
-    if let Some(mut rx) = kc.shutdown {
-        rx.recv().await;
-    } else {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        rx.recv().await;
-    }
-
+    match join!(handle) {
+        (Ok(_),) => (),
+        (Err(e),) => {
+            warn!("rpc thread failed to join");
+        }
+    };
     Ok(())
 }
 
@@ -326,15 +327,6 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
                         continue;
                     }
                 };
-                // if index == 0 {
-                //     log::info!(
-                //         "bc: {:?}, kp: {:?}, bcm: {:?}, kpm: {:?}\n",
-                //         live_backends_list_bc.is_alive_list[1],
-                //         live_backends_list_kp.is_alive_list[1],
-                //         live_backends_list_bc.is_migration_list[1],
-                //         live_backends_list_kp.is_migration_list[1]
-                //     );
-                // }
                 if clk > read_max_clock_so_far {
                     read_max_clock_so_far = clk;
                 }
@@ -418,7 +410,10 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
     Ok(())
 }
 
-pub async fn build_and_serve_keeper_server(keeper: Arc<Keeper>) -> TribResult<()> {
+pub async fn build_and_serve_keeper_server(
+    keeper: Arc<Keeper>,
+    shutdown: Option<tokio::sync::mpsc::Receiver<()>>,
+) -> TribResult<()> {
     let mut addr_iter = match (*keeper).keeper_addrs[(*keeper).my_id as usize].to_socket_addrs() {
         Ok(v) => v,
         Err(e) => {
@@ -444,7 +439,14 @@ pub async fn build_and_serve_keeper_server(keeper: Arc<Keeper>) -> TribResult<()
     };
     tonic::transport::Server::builder()
         .add_service(KeeperSyncServer::new(k))
-        .serve(addr_str)
+        .serve_with_shutdown(addr_str, async {
+            if let Some(mut rx) = shutdown {
+                rx.recv().await;
+            } else {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+                rx.recv().await;
+            }
+        })
         .await?;
     Ok(())
 }
@@ -536,18 +538,7 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                     .await
                 {
                     allocations[keeper_idx].is_alive = true;
-                    let x = heartbeat.get_mut();
-                    // if my_id == 1 {
-                    //     log::info!(
-                    //         "heartbeat live backend list: {}, heartbeat keeper index: {}, my index: {}, my live backend list: {:?}, keeper first index: {}, keeper last index: {}\n",
-                    //         x.live_back_list,
-                    //         x.keeper_index,
-                    //         my_id,
-                    //         live_backends_list_kp.is_alive_list,
-                    //         x.first_back_index,
-                    //         x.last_back_index
-                    //     );
-                    // }
+
                     if read_max_clock_so_far < heartbeat.get_mut().max_clock {
                         read_max_clock_so_far = heartbeat.get_mut().max_clock;
                     }
@@ -589,12 +580,6 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                                 remote_live_back_list.backs[index as usize].clone();
                         }
                     } else {
-                        // if my_id == 1 {
-                        //     log::info!(
-                        //         "live backends list before: {:?}",
-                        //         live_backends_list_kp.is_alive_list
-                        //     );
-                        // }
                         for index in remote_first_back_index..remote_last_back_index + 1 as u32 {
                             live_backends_list_bc.is_alive_list[index as usize] =
                                 remote_live_back_list.is_alive_list[index as usize];
@@ -610,13 +595,6 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                             live_backends_list_kp.backs[index as usize] =
                                 remote_live_back_list.backs[index as usize].clone();
                         }
-                        // if my_id == 1 {
-                        //     log::info!("keeper idx: {}", keeper_idx);
-                        //     log::info!(
-                        //         "live backends list after: {:?}\n\n",
-                        //         live_backends_list_kp.is_alive_list
-                        //     );
-                        // }
                     }
                 } else {
                     allocations[keeper_idx].is_alive = false;
@@ -681,7 +659,6 @@ pub async fn migrate_data_when_down(
     keeper: Arc<Keeper>,
     storage_client_idx: usize,
 ) -> TribResult<()> {
-    // log::info!("migrate data when down has been triggered");
     // Backend failure
     let clone_arc = keeper.live_backends_list_kp.clone();
     let locked_val = clone_arc.lock().await;
@@ -910,7 +887,6 @@ pub async fn migrate_data_when_up(
     keeper: Arc<Keeper>,
     storage_client_idx: usize,
 ) -> TribResult<()> {
-    // log::info!("migrate data when up has been triggered");
     let clone_arc = keeper.live_backends_list_kp.clone();
     let locked_val = clone_arc.lock().await;
     let mut live_backends_list_kp = (*locked_val).clone();
