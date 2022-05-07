@@ -117,9 +117,9 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
         curr_start += n;
     }
     // 1 ROUND OF KEEPER TO BACKEND COMMUNICATION
-    sync_clocks_and_compute_live_bc(keeper.clone(), true).await;
+    sync_clocks_and_compute_live_bc(keeper.clone(), true).await?;
     // 1 ROUND OF KEEPER TO KEEPER COMMUNICATION
-    run_keeper_heartbeat(keeper.clone(), true).await;
+    run_keeper_heartbeat(keeper.clone(), true).await?;
     // send ready signal
     if let Some(tx) = kc.ready.clone() {
         let _ = match tx.send(true) {
@@ -256,16 +256,16 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
                     if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
                         && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                     }
                     if live_backends_list_kp.is_alive_list[index as usize] // node has died
                         && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                     }
                 }
             }
@@ -298,16 +298,16 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
                     if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
                         && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                     }
                     if live_backends_list_kp.is_alive_list[index as usize] // node has died
                         && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                     }
                 }
             }
@@ -326,6 +326,15 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
                         continue;
                     }
                 };
+                // if index == 0 {
+                //     log::info!(
+                //         "bc: {:?}, kp: {:?}, bcm: {:?}, kpm: {:?}\n",
+                //         live_backends_list_bc.is_alive_list[1],
+                //         live_backends_list_kp.is_alive_list[1],
+                //         live_backends_list_bc.is_migration_list[1],
+                //         live_backends_list_kp.is_migration_list[1]
+                //     );
+                // }
                 if clk > read_max_clock_so_far {
                     read_max_clock_so_far = clk;
                 }
@@ -364,16 +373,16 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
                     if !live_backends_list_kp.is_alive_list[index as usize] // node has come alive
                         && live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_up(keeper.clone(), index as usize));
                     }
                     if live_backends_list_kp.is_alive_list[index as usize] // node has died
                         && !live_backends_list_bc.is_alive_list[index as usize] && !live_backends_list_bc.is_migration_list[index as usize]
                     {
-                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                         live_backends_list_bc.is_migration_list[index as usize] = true;
                         live_backends_list_kp.is_migration_list[index as usize] = true;
+                        tokio::spawn(migrate_data_when_down(keeper.clone(), index as usize));
                     }
                 }
             }
@@ -527,6 +536,18 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                     .await
                 {
                     allocations[keeper_idx].is_alive = true;
+                    let x = heartbeat.get_mut();
+                    // if my_id == 1 {
+                    //     log::info!(
+                    //         "heartbeat live backend list: {}, heartbeat keeper index: {}, my index: {}, my live backend list: {:?}, keeper first index: {}, keeper last index: {}\n",
+                    //         x.live_back_list,
+                    //         x.keeper_index,
+                    //         my_id,
+                    //         live_backends_list_kp.is_alive_list,
+                    //         x.first_back_index,
+                    //         x.last_back_index
+                    //     );
+                    // }
                     if read_max_clock_so_far < heartbeat.get_mut().max_clock {
                         read_max_clock_so_far = heartbeat.get_mut().max_clock;
                     }
@@ -568,6 +589,12 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                                 remote_live_back_list.backs[index as usize].clone();
                         }
                     } else {
+                        // if my_id == 1 {
+                        //     log::info!(
+                        //         "live backends list before: {:?}",
+                        //         live_backends_list_kp.is_alive_list
+                        //     );
+                        // }
                         for index in remote_first_back_index..remote_last_back_index + 1 as u32 {
                             live_backends_list_bc.is_alive_list[index as usize] =
                                 remote_live_back_list.is_alive_list[index as usize];
@@ -583,6 +610,13 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                             live_backends_list_kp.backs[index as usize] =
                                 remote_live_back_list.backs[index as usize].clone();
                         }
+                        // if my_id == 1 {
+                        //     log::info!("keeper idx: {}", keeper_idx);
+                        //     log::info!(
+                        //         "live backends list after: {:?}\n\n",
+                        //         live_backends_list_kp.is_alive_list
+                        //     );
+                        // }
                     }
                 } else {
                     allocations[keeper_idx].is_alive = false;
@@ -647,7 +681,7 @@ pub async fn migrate_data_when_down(
     keeper: Arc<Keeper>,
     storage_client_idx: usize,
 ) -> TribResult<()> {
-    log::info!("migrate data when down has been triggered");
+    // log::info!("migrate data when down has been triggered");
     // Backend failure
     let clone_arc = keeper.live_backends_list_kp.clone();
     let locked_val = clone_arc.lock().await;
@@ -858,10 +892,16 @@ pub async fn migrate_data_when_down(
     }
     live_backends_list_kp.is_alive_list[storage_client_idx as usize] = false;
     live_backends_list_kp.is_migration_list[storage_client_idx as usize] = false;
+    live_backends_list_bc.is_migration_list[storage_client_idx as usize] = false;
 
     let clone_arc = keeper.live_backends_list_kp.clone();
     let mut locked_val = clone_arc.lock().await;
     *locked_val = live_backends_list_kp.clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.live_backends_list_bc.clone();
+    let mut locked_val = clone_arc.lock().await;
+    *locked_val = live_backends_list_bc.clone();
     drop(locked_val);
     Ok(())
 }
@@ -870,7 +910,7 @@ pub async fn migrate_data_when_up(
     keeper: Arc<Keeper>,
     storage_client_idx: usize,
 ) -> TribResult<()> {
-    log::info!("migrate data when up has been triggered");
+    // log::info!("migrate data when up has been triggered");
     let clone_arc = keeper.live_backends_list_kp.clone();
     let locked_val = clone_arc.lock().await;
     let mut live_backends_list_kp = (*locked_val).clone();
@@ -1104,10 +1144,16 @@ pub async fn migrate_data_when_up(
 
     live_backends_list_kp.is_alive_list[storage_client_idx as usize] = true;
     live_backends_list_kp.is_migration_list[storage_client_idx as usize] = false;
+    live_backends_list_bc.is_migration_list[storage_client_idx as usize] = false;
 
     let clone_arc = keeper.live_backends_list_kp.clone();
     let mut locked_val = clone_arc.lock().await;
     *locked_val = live_backends_list_kp.clone();
+    drop(locked_val);
+
+    let clone_arc = keeper.live_backends_list_bc.clone();
+    let mut locked_val = clone_arc.lock().await;
+    *locked_val = live_backends_list_bc.clone();
     drop(locked_val);
     Ok(())
 }

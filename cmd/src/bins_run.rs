@@ -88,6 +88,8 @@ pub async fn main(
     let mut interval = time::interval(time::Duration::from_secs(120)); // 30 seconds
     interval.tick().await;
     interval.tick().await;
+
+    let mut death_interval = time::interval(time::Duration::from_secs(45)); // 30 seconds
     println!("==================outside for loop==============");
     handles.swap(0, 1);
     for (arg1, arg2, arg3, arg4, proc_type, idx, h) in handles {
@@ -95,7 +97,8 @@ pub async fn main(
         if proc_type == "backend" && idx == 1 {
             println!("aborting backend 1");
             h.abort();
-            interval.tick().await;
+            death_interval.tick().await;
+            death_interval.tick().await;
             println!("reviving backend 1");
             tokio::spawn(run_srv(arg1, arg2, arg3, arg4));
             continue;
