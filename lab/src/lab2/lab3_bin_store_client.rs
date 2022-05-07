@@ -82,32 +82,32 @@ pub struct LiveBackends {
 
 impl Lab3BinStoreClient {
     async fn find_next_iter(&self, curr_bin_client_index: usize) -> TribResult<BinStoreClient> {
-        //log::info!("In find_next_iter()");
+        log::info!("In find_next_iter()");
 
         let n = self.back_addrs.len() as u64;
 
-        // log::info!(
-        //     "In find_next_iter()::curr_bin_client_index: {}",
-        //     &curr_bin_client_index
-        // );
+        log::info!(
+            "In find_next_iter()::curr_bin_client_index: {}",
+            &curr_bin_client_index
+        );
 
         let mut primary_backend_index = curr_bin_client_index;
 
         let mut is_next_live_found = false;
 
         for backend_index_iter in 0..n {
-            // log::info!(
-            //     "In find_next_iter()::iteration: {}",
-            //     backend_index_iter + curr_bin_client_index as u64
-            // );
+            log::info!(
+                "In find_next_iter()::iteration: {}",
+                backend_index_iter + curr_bin_client_index as u64
+            );
 
             let backend_addr = &self.back_addrs
                 [((backend_index_iter + curr_bin_client_index as u64) % n) as usize]; // start from hashed_backend_index
 
-            // log::info!(
-            //     "In find_next_iter()::backend_addr: {}",
-            //     backend_addr.clone()
-            // );
+            log::info!(
+                "In find_next_iter()::backend_addr: {}",
+                backend_addr.clone()
+            );
 
             let client = StorageClient {
                 addr: format!("http://{}", backend_addr.clone())
@@ -119,7 +119,7 @@ impl Lab3BinStoreClient {
             // perform clock() rpc call to check if the backend is alive
             match client.clock(0).await {
                 Ok(_) => {
-                    // log::info!("In find_next_iter()::getting clock val");
+                    log::info!("In find_next_iter()::getting clock val");
 
                     primary_backend_index =
                         ((backend_index_iter + curr_bin_client_index as u64) % n) as usize;
@@ -131,31 +131,31 @@ impl Lab3BinStoreClient {
         }
 
         if is_next_live_found {
-            // log::info!("In find_next_iter()::next_alive_found",);
+            log::info!("In find_next_iter()::next_alive_found",);
 
             // get a client to the primary backend
             let clone_bin_client_index = Arc::clone(&self.bin_client_index);
             let mut locked_bin_client_index = clone_bin_client_index.lock().await;
 
-            // log::info!(
-            //     "In find_next_iter()::primary_index: {}",
-            //     primary_backend_index.clone()
-            // );
+            log::info!(
+                "In find_next_iter()::primary_index: {}",
+                primary_backend_index.clone()
+            );
 
             *locked_bin_client_index = primary_backend_index.clone() as usize;
 
-            // log::info!(
-            //     "In find_next_iter()::primary_backend_index: {}",
-            //     (*locked_bin_client_index).clone()
-            // );
+            log::info!(
+                "In find_next_iter()::primary_backend_index: {}",
+                (*locked_bin_client_index).clone()
+            );
             std::mem::drop(locked_bin_client_index);
 
             let backend_addr = &self.back_addrs[primary_backend_index as usize].clone();
 
-            // log::info!(
-            //     "In find_next_iter()::backend_addr: {}",
-            //     backend_addr.clone()
-            // );
+            log::info!(
+                "In find_next_iter()::backend_addr: {}",
+                backend_addr.clone()
+            );
 
             let clone_bin_client = Arc::clone(&self.bin_client); // TODO: rename bin_client to STORAGE_CLIENT for clarity
             let mut locked_bin_client = clone_bin_client.lock().await;
@@ -189,32 +189,32 @@ impl Lab3BinStoreClient {
         &self,
         curr_bin_client_index: usize,
     ) -> TribResult<BinStoreClient> {
-        //log::info!("In find_next_iter()");
+        log::info!("In find_next_iter()");
 
         let n = self.back_addrs.len() as u64;
 
-        // log::info!(
-        //     "In find_next_iter()::curr_bin_client_index: {}",
-        //     &curr_bin_client_index
-        // );
+        log::info!(
+            "In find_next_iter()::curr_bin_client_index: {}",
+            &curr_bin_client_index
+        );
 
         let mut secondary_backend_index = curr_bin_client_index;
 
         let mut is_next_live_found = false;
 
         for backend_index_iter in 0..n {
-            // log::info!(
-            //     "In find_next_iter()::iteration: {}",
-            //     backend_index_iter + curr_bin_client_index as u64
-            // );
+            log::info!(
+                "In find_next_iter()::iteration: {}",
+                backend_index_iter + curr_bin_client_index as u64
+            );
 
             let backend_addr = &self.back_addrs
                 [((backend_index_iter + curr_bin_client_index as u64) % n) as usize]; // start from hashed_backend_index
 
-            // log::info!(
-            //     "In find_next_iter()::backend_addr: {}",
-            //     backend_addr.clone()
-            // );
+            log::info!(
+                "In find_next_iter()::backend_addr: {}",
+                backend_addr.clone()
+            );
 
             let client = StorageClient {
                 addr: format!("http://{}", backend_addr.clone())
@@ -226,7 +226,7 @@ impl Lab3BinStoreClient {
             // perform clock() rpc call to check if the backend is alive
             match client.clock(0).await {
                 Ok(_) => {
-                    // log::info!("In find_next_iter()::getting clock val");
+                    log::info!("In find_next_iter()::getting clock val");
 
                     secondary_backend_index =
                         ((backend_index_iter + curr_bin_client_index as u64) % n) as usize;
@@ -238,7 +238,7 @@ impl Lab3BinStoreClient {
         }
 
         if is_next_live_found {
-            // log::info!("In find_next_iter()::next_alive_found",);
+            log::info!("In find_next_iter()::next_alive_found",);
 
             let backend_addr = &self.back_addrs[secondary_backend_index as usize].clone();
 
@@ -357,7 +357,7 @@ impl storage::KeyString for Lab3BinStoreClient {
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         // fetch log by forwarding request to bin_store_client. It will handle prepending name and handling bin part
 
-        //log::info!("In get");
+        log::info!("In get");
 
         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
         let locked_bin_client_index = clone_bin_client_index.lock().await;
@@ -375,7 +375,7 @@ impl storage::KeyString for Lab3BinStoreClient {
         }; // this will work with the current bin_client_index being the hashed value
            // this will update the next alive in the cached bin store client and cached storage client.
 
-        // log::info!("back in get after finding next alive");
+        log::info!("back in get after finding next alive");
 
         let clone_bin_store_client = Arc::clone(&self.bin_store_client);
         let locked_bin_store_client = clone_bin_store_client.lock().await;
@@ -584,7 +584,7 @@ impl storage::KeyString for Lab3BinStoreClient {
     }
 
     async fn set(&self, kv: &storage::KeyValue) -> TribResult<bool> {
-        // log::info!("In set");
+        log::info!("In set");
 
         let clone_bin_client_index = Arc::clone(&self.bin_client_index);
         let locked_bin_client_index = clone_bin_client_index.lock().await;
@@ -608,7 +608,7 @@ impl storage::KeyString for Lab3BinStoreClient {
 
         match cached_bin_store_client.clock(0).await {
             Ok(seq_num) => {
-                // log::info!("1st success");
+                log::info!("1st success");
 
                 // note the new seq num and continue to list append here itself
                 let new_update_log = UpdateLog {
@@ -637,7 +637,7 @@ impl storage::KeyString for Lab3BinStoreClient {
                 let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
                     Ok(_) => {
                         // clock and primary append is successful
-                        // log::info!("2 success");
+                        log::info!("2 success");
 
                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -1866,7 +1866,7 @@ impl storage::KeyList for Lab3BinStoreClient {
 
         match cached_bin_store_client.clock(0).await {
             Ok(seq_num) => {
-                // log::info!("1st success");
+                log::info!("1st success");
 
                 // note the new seq num and continue to list append here itself
                 let new_update_log = UpdateLog {
@@ -1895,7 +1895,7 @@ impl storage::KeyList for Lab3BinStoreClient {
                 let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
                     Ok(_) => {
                         // clock and primary append is successful
-                        // log::info!("2 success");
+                        log::info!("2 success");
 
                         // add this bin to primary list of the node - SHOULD this be before appending the log? NO
                         let primary_list_append_kv = tribbler::storage::KeyValue {
@@ -2543,7 +2543,7 @@ impl storage::KeyList for Lab3BinStoreClient {
 
         let remove_result: TribResult<u32> = match cached_bin_store_client.clock(0).await {
             Ok(seq_num) => {
-                // log::info!("1st success");
+                log::info!("1st success");
 
                 // note the new seq num and continue to list append here itself
                 let new_update_log = UpdateLog {
@@ -2574,7 +2574,7 @@ impl storage::KeyList for Lab3BinStoreClient {
                 let _ = match cached_bin_store_client.list_append(&log_append_kv).await {
                     Ok(_) => {
                         // clock and primary append is successful
-                        // log::info!("2 success");
+                        log::info!("2 success");
 
                         // let fetched_log_result: Option<storage::List> =
                         //     match cached_bin_store_client.list_get(KEY_UPDATE_LOG).await {
@@ -3391,7 +3391,7 @@ impl storage::KeyList for Lab3BinStoreClient {
                 {
                     if each_log.seq_num < min_seq_num_till_now {
                         if matches!(each_log.update_operation, UpdateOperation::ListAppend) {
-                            // log::info!("{}", each_log.seq_num);
+                            log::info!("{}", each_log.seq_num);
                             remove_count += 1;
                             min_seq_num_till_now = each_log.seq_num;
                         } else if matches!(each_log.update_operation, UpdateOperation::ListRemove) {

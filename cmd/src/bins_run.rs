@@ -9,7 +9,7 @@ use std::{
 
 use lab::{lab1, lab2};
 use log::{error, info, warn, LevelFilter};
-use tokio::join;
+use tokio::{join, time, task::JoinHandle};
 use tribbler::{addr, config::Config, err::TribResult, storage::MemStorage};
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,8 @@ pub async fn main(
     println!("{:?}", config);
     let (tx, rdy) = mpsc::channel();
 
+    let mut shutdown_sender:Option<tokio::sync::mpsc::Sender<()>> = None;
+
     let mut handles = vec![];
     let it = match t {
         ProcessType::Back => &config.backs,
@@ -41,12 +43,23 @@ pub async fn main(
     };
     for (i, srv) in it.iter().enumerate() {
         if addr::check(srv)? {
-            handles.push(tokio::spawn(run_srv(
+            let handle = tokio::spawn(run_srv(
                 t.clone(),
                 i,
                 config.clone(),
                 Some(tx.clone()),
-            )));
+            ));
+
+            let is_keeper_process = match t {
+                ProcessType::Back => false,
+                ProcessType::Keep => true,
+            };
+            let mut process_type = "backend";
+            if is_keeper_process {
+                process_type = "keeper";
+            }
+
+            handles.push((t.clone(), i, config.clone(), Some(tx.clone()), process_type, i, handle));
         }
     }
     let proc_name = match t {
@@ -71,7 +84,23 @@ pub async fn main(
             process::exit(1);
         }
     }
-    for h in handles {
+
+    let mut interval = time::interval(time::Duration::from_secs(120)); // 30 seconds
+    interval.tick().await;
+    interval.tick().await;
+    println!("==================outside for loop==============");
+    handles.swap(0, 1);
+    for (arg1, arg2, arg3, arg4, proc_type, idx, h) in handles {
+        // println!("{}, {}, {:?}", proc_type, idx, h);
+        if proc_type == "backend" && idx == 1 {
+            println!("aborting backend 1");
+            h.abort();
+            interval.tick().await;
+            println!("reviving backend 1");
+            tokio::spawn(run_srv(arg1, arg2, arg3, arg4));
+            continue;
+        }
+
         match join!(h) {
             (Ok(_),) => (),
             (Err(e),) => {
@@ -83,17 +112,21 @@ pub async fn main(
 }
 
 #[allow(unused_must_use)]
-async fn run_srv(t: ProcessType, idx: usize, config: Arc<Config>, tx: Option<Sender<bool>>) {
+async fn run_srv(t: ProcessType, idx: usize, config: Arc<Config>, tx: Option<Sender<bool>>) -> Option<tokio::sync::mpsc::Sender<()>> {
     match t {
         ProcessType::Back => {
-            let cfg = config.back_config(idx, Box::new(MemStorage::default()), tx, None);
+            let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let cfg = config.back_config(idx, Box::new(MemStorage::default()), tx, Some(shut_rx));
             info!("starting backend on {}", cfg.addr);
             lab1::serve_back(cfg).await;
+            return Some(shut_tx.clone());
         }
         ProcessType::Keep => {
-            let cfg = config.keeper_config(idx, tx, None).unwrap();
+            let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let cfg = config.keeper_config(idx, tx, Some(shut_rx)).unwrap();
             info!("starting keeper on {}", cfg.addr());
             lab2::serve_keeper(cfg).await;
+            return Some(shut_tx.clone());
         }
     };
 }
