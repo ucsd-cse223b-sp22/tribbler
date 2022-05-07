@@ -594,7 +594,7 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
         if read_max_clock_so_far > max_clock_so_far {
             max_clock_so_far = read_max_clock_so_far + 1;
         }
-        // TODO: Update keeper to backend allocations
+
         let kp_len = keeper_addrs.len();
         for j in 1..kp_len {
             if !allocations[(my_id as usize + j) % kp_len].is_alive {
@@ -726,14 +726,14 @@ pub async fn migrate_data_when_down(
         let bin_store_client_i_plus_1 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_plus_1.clone(),
         };
 
         let bin_store_client_i_plus_2 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_plus_2.clone(),
         };
 
@@ -761,7 +761,7 @@ pub async fn migrate_data_when_down(
             let serialized_log_elem = serde_json::to_string(&log)?;
 
             let append_kv = storage::KeyValue {
-                key: bin_name.clone(),
+                key: KEY_UPDATE_LOG.to_string(),
                 value: serialized_log_elem,
             };
 
@@ -803,14 +803,14 @@ pub async fn migrate_data_when_down(
         let bin_store_client_i_minus_1 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_minus_1.clone(),
         };
 
         let bin_store_client_i_plus_1 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_plus_1.clone(),
         };
 
@@ -839,7 +839,7 @@ pub async fn migrate_data_when_down(
             let serialized_log_elem = serde_json::to_string(&log)?;
 
             let append_kv = storage::KeyValue {
-                key: bin_name.clone(),
+                key: KEY_UPDATE_LOG.to_string(),
                 value: serialized_log_elem,
             };
 
@@ -953,14 +953,14 @@ pub async fn migrate_data_when_up(
         let bin_store_client_i_minus_1 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_minus_1.clone(),
         };
 
         let bin_store_client_i = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i.clone(),
         };
 
@@ -989,7 +989,7 @@ pub async fn migrate_data_when_up(
             let serialized_log_elem = serde_json::to_string(&log)?;
 
             let append_kv = storage::KeyValue {
-                key: bin_name.clone(),
+                key: KEY_UPDATE_LOG.to_string(),
                 value: serialized_log_elem,
             };
 
@@ -1035,14 +1035,14 @@ pub async fn migrate_data_when_up(
         let bin_store_client_i_plus_1 = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i_plus_1.clone(),
         };
 
         let bin_store_client_i = BinStoreClient {
             name: bin_name.clone(),
             colon_escaped_name: colon_escaped_name.clone(),
-            clients: vec![], // TODO: Check later
+            clients: vec![],
             bin_client: sc_i.clone(),
         };
 
@@ -1070,7 +1070,7 @@ pub async fn migrate_data_when_up(
             let serialized_log_elem = serde_json::to_string(&log)?;
 
             let append_kv = storage::KeyValue {
-                key: bin_name.clone(),
+                key: KEY_UPDATE_LOG.to_string(),
                 value: serialized_log_elem,
             };
 
