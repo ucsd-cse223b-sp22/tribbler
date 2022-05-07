@@ -2,14 +2,15 @@ use crate::{
     keeper::{keeper_sync_client::KeeperSyncClient, keeper_sync_server::KeeperSyncServer},
     lab2::bin_store::BinStore,
 };
+use log::warn;
 use std::{
     cmp::min,
     collections::{hash_map::DefaultHasher, HashSet},
     hash::Hasher,
     net::ToSocketAddrs,
-    sync::Arc,
+    sync::{mpsc::Receiver, Arc},
 };
-use tokio::sync::Mutex;
+use tokio::{join, sync::Mutex};
 
 use tokio::time::{self, interval};
 use tribbler::{
@@ -32,7 +33,7 @@ use super::{
 };
 
 // use super::{frontend::FrontEnd, storage_client::StorageClient};
-
+#[derive(Debug)]
 pub struct Allocation {
     pub start: usize,
     pub end: usize,
@@ -90,8 +91,9 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
         my_id: MY_ID,
         cached_conn: CACHED_CONN.clone(),
     });
+
     // STARTED RPC SERVER
-    tokio::spawn(build_and_serve_keeper_server(keeper.clone()));
+    let mut handle = tokio::spawn(build_and_serve_keeper_server(keeper.clone(), kc.shutdown));
 
     // INITIAL BACKEND ALLOCATION TO KEEPER
     let bc_len = kc.backs.len();
@@ -131,13 +133,12 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
     tokio::spawn(sync_clocks_and_compute_live_bc(keeper.clone(), false));
     tokio::spawn(run_keeper_heartbeat(keeper.clone(), false));
 
-    if let Some(mut rx) = kc.shutdown {
-        rx.recv().await;
-    } else {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        rx.recv().await;
-    }
-
+    match join!(handle) {
+        (Ok(_),) => (),
+        (Err(e),) => {
+            warn!("rpc thread failed to join");
+        }
+    };
     Ok(())
 }
 
@@ -418,7 +419,10 @@ pub async fn sync_clocks_and_compute_live_bc(keeper: Arc<Keeper>, initial: bool)
     Ok(())
 }
 
-pub async fn build_and_serve_keeper_server(keeper: Arc<Keeper>) -> TribResult<()> {
+pub async fn build_and_serve_keeper_server(
+    keeper: Arc<Keeper>,
+    shutdown: Option<tokio::sync::mpsc::Receiver<()>>,
+) -> TribResult<()> {
     let mut addr_iter = match (*keeper).keeper_addrs[(*keeper).my_id as usize].to_socket_addrs() {
         Ok(v) => v,
         Err(e) => {
@@ -444,7 +448,14 @@ pub async fn build_and_serve_keeper_server(keeper: Arc<Keeper>) -> TribResult<()
     };
     tonic::transport::Server::builder()
         .add_service(KeeperSyncServer::new(k))
-        .serve(addr_str)
+        .serve_with_shutdown(addr_str, async {
+            if let Some(mut rx) = shutdown {
+                rx.recv().await;
+            } else {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+                rx.recv().await;
+            }
+        })
         .await?;
     Ok(())
 }
@@ -537,16 +548,13 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
                 {
                     allocations[keeper_idx].is_alive = true;
                     let x = heartbeat.get_mut();
-                    // if my_id == 1 {
-                    //     log::info!(
-                    //         "heartbeat live backend list: {}, heartbeat keeper index: {}, my index: {}, my live backend list: {:?}, keeper first index: {}, keeper last index: {}\n",
-                    //         x.live_back_list,
-                    //         x.keeper_index,
-                    //         my_id,
-                    //         live_backends_list_kp.is_alive_list,
-                    //         x.first_back_index,
-                    //         x.last_back_index
-                    //     );
+                    // if my_id == 2 {
+                    // log::info!(
+                    //     "keeper_id: {}, keeper first index: {}, keeper last index: {}\n",
+                    //     x.keeper_index,
+                    //     x.first_back_index,
+                    //     x.last_back_index,
+                    // );
                     // }
                     if read_max_clock_so_far < heartbeat.get_mut().max_clock {
                         read_max_clock_so_far = heartbeat.get_mut().max_clock;
@@ -628,7 +636,6 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
         if read_max_clock_so_far > max_clock_so_far {
             max_clock_so_far = read_max_clock_so_far + 1;
         }
-
         let kp_len = keeper_addrs.len();
         for j in 1..kp_len {
             if !allocations[(my_id as usize + j) % kp_len].is_alive {
@@ -669,6 +676,15 @@ pub async fn run_keeper_heartbeat(keeper: Arc<Keeper>, initial: bool) -> TribRes
         let mut locked_val = clone_arc.lock().await;
         *locked_val = cached_conn;
         drop(locked_val);
+
+        if my_id == 2 {
+            log::info!(
+                "keeper first index: {}, keeper last index: {}, allocations: {:?}\n",
+                my_first_back_index,
+                my_last_back_index,
+                allocations
+            );
+        }
 
         if initial {
             break;

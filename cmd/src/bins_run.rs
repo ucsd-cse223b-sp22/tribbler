@@ -1,7 +1,7 @@
 use std::{
     process,
     sync::{
-        mpsc::{self, Sender},
+        mpsc::{self, Sender, Receiver},
         Arc,
     },
     time::Duration,
@@ -34,20 +34,34 @@ pub async fn main(
     println!("{:?}", config);
     let (tx, rdy) = mpsc::channel();
 
-    let mut shutdown_sender:Option<tokio::sync::mpsc::Sender<()>> = None;
+    let mut shutdown_sender_vec:Vec<tokio::sync::mpsc::Sender<()>> = vec![];
+
+    // let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
+    
 
     let mut handles = vec![];
     let it = match t {
         ProcessType::Back => &config.backs,
         ProcessType::Keep => &config.keepers,
     };
+
+    let mut xinterval = time::interval(time::Duration::from_secs(10)); // 30 seconds
+    // interval.tick().await;
+    // interval.tick().await;
     for (i, srv) in it.iter().enumerate() {
+        // if i == it.len() - 1 {
+        //     xinterval.tick().await;
+        //     xinterval.tick().await;
+        // }
+        let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1);
+        shutdown_sender_vec.push(shut_tx);
         if addr::check(srv)? {
             let handle = tokio::spawn(run_srv(
                 t.clone(),
                 i,
                 config.clone(),
                 Some(tx.clone()),
+                shut_rx
             ));
 
             let is_keeper_process = match t {
@@ -85,22 +99,21 @@ pub async fn main(
         }
     }
 
-    let mut interval = time::interval(time::Duration::from_secs(120)); // 30 seconds
+    let mut interval = time::interval(time::Duration::from_secs(10)); // 30 seconds
     interval.tick().await;
     interval.tick().await;
 
-    let mut death_interval = time::interval(time::Duration::from_secs(45)); // 30 seconds
-    println!("==================outside for loop==============");
-    handles.swap(0, 1);
+    let mut death_interval = time::interval(time::Duration::from_secs(1)); // 30 seconds
+    // handles.swap(0, 1);
     for (arg1, arg2, arg3, arg4, proc_type, idx, h) in handles {
         // println!("{}, {}, {:?}", proc_type, idx, h);
-        if proc_type == "backend" && idx == 1 {
-            println!("aborting backend 1");
-            h.abort();
-            death_interval.tick().await;
-            death_interval.tick().await;
-            println!("reviving backend 1");
-            tokio::spawn(run_srv(arg1, arg2, arg3, arg4));
+        if proc_type == "keeper" && idx == 0 {
+            println!("==========================aborting keeper {}==================================", idx);
+            shutdown_sender_vec[idx].send(()).await?;
+            // death_interval.tick().await;
+            // death_interval.tick().await;
+            // println!("=================================reviving keeper {}==========================", idx);
+            // tokio::spawn(run_srv(arg1, arg2, arg3, arg4));
             continue;
         }
 
@@ -115,21 +128,19 @@ pub async fn main(
 }
 
 #[allow(unused_must_use)]
-async fn run_srv(t: ProcessType, idx: usize, config: Arc<Config>, tx: Option<Sender<bool>>) -> Option<tokio::sync::mpsc::Sender<()>> {
+async fn run_srv(t: ProcessType, idx: usize, config: Arc<Config>, tx: Option<Sender<bool>>, rx: tokio::sync::mpsc::Receiver<()>) {
     match t {
         ProcessType::Back => {
-            let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
-            let cfg = config.back_config(idx, Box::new(MemStorage::default()), tx, Some(shut_rx));
+            let cfg = config.back_config(idx, Box::new(MemStorage::default()), tx, Some(rx));
             info!("starting backend on {}", cfg.addr);
             lab1::serve_back(cfg).await;
-            return Some(shut_tx.clone());
         }
         ProcessType::Keep => {
-            let (shut_tx, shut_rx) = tokio::sync::mpsc::channel::<()>(1);
-            let cfg = config.keeper_config(idx, tx, Some(shut_rx)).unwrap();
+            // if idx != 0 {
+            let cfg = config.keeper_config(idx, tx, Some(rx)).unwrap();
             info!("starting keeper on {}", cfg.addr());
             lab2::serve_keeper(cfg).await;
-            return Some(shut_tx.clone());
+            // }
         }
     };
 }
