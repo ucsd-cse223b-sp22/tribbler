@@ -1,5 +1,9 @@
 # Fault-Tolerant Distributed Key-Value Storage System (Lab3)
 
+<p align="center">
+  <img src="https://github.com/ucsd-cse223b-sp22/tribbler/blob/master/distributed-key-value-store.PNG" style="height: auto; width: 800px">
+</p>
+
 **Note:** `ucsd-cse223b-sp22/tribbler/lab/src/lab2` and `ucsd-cse223b-sp22/tribbler/lab/proto` contains the key code files for the project. The following documentation explains the major software artifacts in the project.
 
 ## Keepers
